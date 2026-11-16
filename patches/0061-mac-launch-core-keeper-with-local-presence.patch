@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Mon, 16 Nov 2026 11:44:31 +1300
+Subject: [PATCH] mac: launch Core Keeper with local presence
+
+Upstream-Status: fork-only
+Reason: Core Keeper aborts if offline presence initialization fails
+Issue: Core Keeper local Mac compatibility
+
+---
+ dm/host/hle_friends.c         | 9 ++++++++-
+ scripts/build_ipa_from_nsp.py | 6 ++++++
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/dm/host/hle_friends.c b/dm/host/hle_friends.c
+index 7f41e6c..1ae0b27 100644
+--- a/dm/host/hle_friends.c
++++ b/dm/host/hle_friends.c
+@@ -2,6 +2,8 @@
+ // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
+ // Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
+ #include "hle.h"
++#include <stdlib.h>
++#include <string.h>
+ 
+ // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
+ static _Alignas(16) uint8_t g_ev_notify[0x100], g_ev_invite[0x100];
+@@ -61,6 +63,11 @@ HLE_FORCE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAcco
+ HLE_FORCE("_ZN2nn7friends28DeclareOpenOnlinePlaySessionERKNS_7account3UidE", "online play session unavailable (cut)", Result, h_fr_OpenSession, const void *uid) { (void)uid; return RES_FAIL; }
+ HLE_FORCE("_ZN2nn7friends29DeclareCloseOnlinePlaySessionERKNS_7account3UidE", "online play session unavailable (cut)", Result, h_fr_CloseSession, const void *uid) { (void)uid; return RES_FAIL; }
+ // Presence
+-HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "presence unavailable (cut)", Result, h_fr_UpInit, void *self, const void *uid) { (void)self; (void)uid; return RES_FAIL; }
++HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "presence unavailable (cut)", Result, h_fr_UpInit, void *self, const void *uid) {
++    (void)self; (void)uid;
++    // Core Keeper aborts when presence setup fails. A local session needs no online service.
++    const char *local = getenv("DM_LOCAL_PRESENCE");
++    return local && !strcmp(local, "1") ? RES_OK : RES_FAIL;
++}
+ HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "presence unavailable (cut)", Result, h_fr_UpDesc, void *self, const char *s) { (void)self; (void)s; return RES_FAIL; }
+ HLE_FORCE("_ZN2nn7friends12UserPresence6CommitEv", "presence unavailable (cut)", Result, h_fr_UpCommit, void *self) { (void)self; return RES_FAIL; }
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index f65afa0..1ecc765 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -4426,6 +4426,12 @@ def main(args=None):
+         else:
+             capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
+     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
++    if mac_pack and g.id == '010070201D1BA000':
++        pairs = env_file_pairs(env_file) if env_file else {}
++        pairs.setdefault('DM_LOCAL_PRESENCE', '1')
++        launch_env = work / 'corekeeper_mac_env.txt'
++        launch_env.write_text(''.join(f'{k}={v}\n' for k, v in pairs.items()))
++        env_file = str(launch_env)
+     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
+     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
+         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
