@@ -92,14 +92,14 @@ extension BuildStore {
             return
         }
         if isNxkitSelected {
-            if let why = nxkitProblem() {
+            if let why = nxkitProblem() ?? nxkitWorkRootProblem() {
                 fail(why)
                 return
             }
             nxkitRun = true
             let tidHex = buildKey
             // The work folder is a cache of the game (a second build reuses its stages). The app is built in the output folder's `<id>_build` and placed beside it.
-            let workDir = NxkitBuilder.workDirectory(home: home, key: tidHex)
+            let workDir = NxkitBuilder.workDirectory(root: nxkitWorkRoot, key: tidHex)
             let appFolder = (outDir.isEmpty ? inputFolder : outDir) + "/" + tidHex + "_build"
             if cloudFolderCheck(appFolder) {
                 failure = BuildFailure(kind: .cloudFolder, gameName: nil, detail: appFolder)
@@ -206,6 +206,11 @@ extension BuildStore {
             fail(why)
             return
         }
+        // The script writes the game's build seed at the end: not onto this Mac's disk when the seeds' drive is not connected
+        if let why = seedRootProblem() {
+            fail(why)
+            return
+        }
         var inputDir = folder?.scriptInput ?? baseDir   // a NUP goes to the script as the file
         // A file named .NSP or .Xci is staged too, under a lowercase extension: the script's glob misses it (#554).
         if dirs.count > 1 || !unpicked.isEmpty || staged.contains(where: InputStaging.needsLowercaseName) {
@@ -239,16 +244,20 @@ extension BuildStore {
             let e = ($0 as NSString).pathExtension.lowercased()
             return e == "nsz" || e == "xcz"
         }
-        if compressed, !Toolchain.runOK(py, ["-c", "import nsz"]) {
-            say(t("msg.installingNsz"))
-            let r = runner.runCaptured([py, "-m", "pip", "install", "nsz"],
-                                     env: ["PATH": BuildCommands.toolPath(python: py),
-                                           "HOME": NSHomeDirectory()].merging(BundledTools.environment(for: py)) { $1 }) { @Sendable line in
-                hop { self.append(line + "\n") }
-            }
-            if !r {
-                fail(String(format: t("msg.nszFailed"), py))
-                return
+        // nsz lives in a folder the launcher owns: an externally managed Python refuses pip install (#1500).
+        // Only a compressed input uses it, so other builds never see its packages on PYTHONPATH.
+        if compressed {
+            let nszEnv = PythonPackages.environment(python: py, env: ["PATH": BuildCommands.toolPath(python: py),
+                                                                      "HOME": NSHomeDirectory()].merging(BundledTools.environment(for: py)) { $1 }, runner: runner)
+            if !Toolchain.runOK(py, ["-c", "import nsz"], env: ProcessInfo.processInfo.environment.merging(nszEnv) { $1 }) {
+                say(t("msg.installingNsz"))
+                let r = PythonPackages.installNsz(python: py, env: nszEnv, runner: runner) { @Sendable line in
+                    hop { self.append(line + "\n") }
+                }
+                if !r {
+                    fail(String(format: t("msg.nszFailed"), py))
+                    return
+                }
             }
         }
         let engine = EngineLayout.root(repo.path)   // the checkout's engine/ (#214)
@@ -312,6 +321,7 @@ extension BuildStore {
         // 'NuGet-Migrations' + lstat("") == ENOENT before any project is read. NSTemporaryDirectory()
         // is the per-user temp folder whether or not the app's own environment carries one.
         var denv = toolEnvironment(python: py)
+        if compressed { denv = PythonPackages.environment(python: py, env: denv, runner: runner) }
         if !oneGameIPAPath.isEmpty { denv.merge(OneGameIPA.environment) { $1 } }
         let launch = ProcessLaunch(executable: py, arguments: args, environment: denv, directory: engine, groupPython: py)
         startBuildProcess(launch: launch, envCleanup: tempEnvURL, macOutput: macOutput)

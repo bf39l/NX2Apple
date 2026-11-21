@@ -75,6 +75,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
                     }
                 }
                 enforceUpstreamForCurrentGame()
+                dropFailureOfOtherGame()
             }
         }
     }
@@ -92,6 +93,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
             if gameFolder != oldValue {
                 invalidateKeyProblem()
                 enforceUpstreamForCurrentGame()
+                dropFailureOfOtherGame()
             }
         }
     }
@@ -130,8 +132,14 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     /// What the NSP script stopped on, when it is one of the known early stops (BuildFailureClassifier). nil for a build that
     /// succeeded, is running, or failed some other way (the note then shows the last line of the log, as it always did).
     @Published package var failure: BuildFailure? {
-        didSet { if failure?.titleIDs != oldValue?.titleIDs { failureChoice = nil } }
+        didSet {
+            if failure?.titleIDs != oldValue?.titleIDs { failureChoice = nil }
+            failureGameKey = failure == nil ? nil : buildKey
+        }
     }
+    /// The game the failure is for (its `buildKey` when the failure was set). Another game chosen on the Builds page drops it
+    /// (`dropFailureOfOtherGame`), so a failure never shows under a game it did not happen to.
+    package private(set) var failureGameKey: String?
     /// The game picked in a "several games" failure's list (BuildFailureCard), not built yet: the footer's Build game builds it.
     @Published package var failureChoice: String?
     /// The failure asks which of several games to build, and the launcher can build one of them.
@@ -154,7 +162,13 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     /// different pipeline: same extraction, rewrite and shaders, then dm/mac/pack_app.py.
     @Published package var target: String {
         didSet {
-            defaults.set(target, forKey: Self.targetKey)
+            // A Mac-only engine (nxkit, MacNativeGames) builds for the Mac whatever was asked. The saved choice stays as the player
+            // set it, so the engine that builds for iOS gets it back (`buildUpstream`).
+            if isMacOnlyUpstreamSelected {
+                if target != BuildTarget.mac { defaults.set(target, forKey: Self.targetKey); target = BuildTarget.mac }
+            } else {
+                defaults.set(target, forKey: Self.targetKey)
+            }
             if !running { runningTarget = target }
             if oldValue != target { targetChanged() }
         }
@@ -187,8 +201,11 @@ func hop(_ body: @escaping @MainActor () -> Void) {
                 return
             }
             defaults.set(buildUpstream.rawValue, forKey: Self.buildUpstreamKey)
-            if buildUpstream.buildsMacOnly && isUpstreamEnabled(buildUpstream) && target != BuildTarget.mac {
+            if isMacOnlyUpstreamSelected && target != BuildTarget.mac {
                 target = BuildTarget.mac
+            } else if !isMacOnlyUpstreamSelected, oldValue.buildsMacOnly, !running {
+                let saved = BuildTarget.saved(defaults)   // back from a Mac-only engine: the player's own choice again
+                if saved != target { target = saved }
             }
             if oldValue != buildUpstream {
                 upstreamChanged()
@@ -280,8 +297,10 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     var shellBatchRetry: [DeferredShellGame]?
     var shellDeviceChecked = false
     package let driveCancel = LockedFlag()   // Stop of the copy to a drive (BuildStore+Send.swift)
-    @Published package var shellMove: ShellMove = .idle   // Move cache folder (BuildStore+ShellRoot.swift, #427)
-    package let shellMoveStop = LockedFlag()
+    @Published package var shellMove: CacheMove = .idle   // Move cache folder (BuildStore+ShellRoot.swift, #427)
+    @Published package var nxkitMove: CacheMove = .idle   // the nxkit work folder and the build seeds (BuildStore+CacheFolders.swift)
+    @Published package var seedMove: CacheMove = .idle
+    package let shellMoveStop = LockedFlag()   // Stop of the cache move that runs (one at a time, on `running`)
     let installCancel = LockedFlag()
     var installPhaseActive = false
     package var fastRefreshActive = false
@@ -306,6 +325,8 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     }
     /// The home folder the default shell root is in. Tests use a temporary one, so they never touch the real Application Support.
     package var home = NSHomeDirectory()
+    /// The launcher's own environment, read for `DM_SEED_CACHE_DIR` (BuildCacheRoots). Tests set their own.
+    package var launcherEnvironment = ProcessInfo.processInfo.environment
 
     // ---- The app's side: AppKit and the wiring, as closures ----
     /// The games whose data can go to a device: the app fills it from the library (title ID, name, the packed data folder).
@@ -317,6 +338,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     /// The build queue (#943), wired by the app so the Build page's start actions can run a staged queue batch.
     package weak var queue: BuildQueueStore? {
         didSet {
+            queue?.macOnly = { [weak self] in self?.isMacOnlyUpstreamSelected ?? false }
             queueHasIOS = queue?.hasIOS ?? false
             let count = queue?.games.filter(\.waiting).count ?? 0
             if queuedCount != count { queuedCount = count }
@@ -449,9 +471,8 @@ func hop(_ body: @escaping @MainActor () -> Void) {
         }
         refreshNxkit()
         if buildUpstream.buildsMacOnly && target != BuildTarget.mac {
-            target = BuildTarget.mac
+            target = BuildTarget.mac   // the saved choice stays for the engine that builds for iOS
             runningTarget = BuildTarget.mac
-            defaults.set(BuildTarget.mac, forKey: Self.targetKey)
         }
         refreshUpstreamLocalVersions()
     }
@@ -502,8 +523,8 @@ func hop(_ body: @escaping @MainActor () -> Void) {
 
     package func stop() {
         if running { stoppedByPlayer = true }
-        if case .moving = shellMove {
-            stopShellMove()
+        if cacheMoveRuns {
+            stopCacheMove()
             return
         }
         if stopPendingInstallOrCopy() { return }

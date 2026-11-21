@@ -295,11 +295,11 @@ struct ConsolePadSnapshot: Equatable {
     private func beginLaunch(_ gameID: String, generation: UInt64) {
         guard launchGeneration == generation, state.startingGameID == gameID, let game = library.games.first(where: { $0.id.uuidString == gameID }) else { return }
         let environment = GameStart.environment(for: game, library: library, controls: controls, repo: repo(), labels: labels, lang: lang(), fullscreen: true, player: player(), saves: saves(game.titleID), sticks: sticks(), homeMenu: true)   // the Home menu's way back here (#952)
-            .merging(pointerHidden() ? ["DM_CURSOR_HIDDEN": "1"] : [:]) { $1 }   // the game is a new process: without this its pointer shows until its own idle wait ends
+            .merging(pointerHidden() ? ["DM_CURSOR_HIDDEN": "1", "NXKIT_CURSOR_HIDDEN": "1"] : [:]) { $1 }   // the game is a new process: without this its pointer shows until its own idle wait ends (nxkit reads its own name)
             .merging(FrameTimes.recordingEnvironment(for: game, library: library.folder)) { $1 }   // a frame-time recording, as the desktop Play adds (FrameTimes.swift)
         state.starting = .preparing
         cloudGameID = gameID
-        cloudGate.begin(game, proceed: { [weak self] choice in   // the cloud's save first (LiveConsoleDriver+CloudSave.swift, #957)
+        cloudGate.begin(game, environment: environment, proceed: { [weak self] choice in   // the cloud's save first (LiveConsoleDriver+CloudSave.swift, #957)
             guard let self, self.launchGeneration == generation, self.state.startingGameID == gameID else { return }
             self.state.starting = .preparing
             self.prepareLaunch { [weak self] in
@@ -334,11 +334,20 @@ struct ConsolePadSnapshot: Equatable {
                     self.library.recordPlayed(game.id)   // the Recently played order (#937)
                     if let pid { self.beginTracking(game, pid: pid, environment: environment) }   // the session, its pause and its end (+Sessions)
                     self.launchedGame = game
-                    if let pid { GameReturnWatcher.shared.didStart(pid: pid) { [weak self] in self?.gameDidTerminate(pid: pid) } }   // the launcher's one watcher and its switch (ReturnAfterPlay.swift)
+                    if let pid {   // the launcher's one watcher and its switch (ReturnAfterPlay.swift), and the cloud's send an engine leaves to it (SaveEngine)
+                        GameReturnWatcher.shared.didStart(pid: pid) { [weak self] in
+                            CloudSaveSend.afterExit(app: game.appPath, environment: environment, engine: SaveEngines.forApp(game.appPath))
+                            self?.gameDidTerminate(pid: pid)
+                        }
+                    }
                     self.state.starting = .opening
                     self.timeoutTask?.cancel()
+                    // An app nxkit built says when its picture shows (org.nxkit.shown, at the latest 45 s after its window):
+                    // the Starting screen waits for it, with a longer fallback than the usual one
+                    let nxkit = self.tracking.notificationPrefix == NxkitLaunch.notificationPrefix
+                    let wait = nxkit ? max(self.startingTimeout, 120) : self.startingTimeout
                     self.timeoutTask = Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: UInt64((self?.startingTimeout ?? 20) * 1_000_000_000))
+                        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                         guard !Task.isCancelled, self?.launchGeneration == generation else { return }
                         self?.gameWindowAppeared()
                     }
@@ -351,7 +360,9 @@ struct ConsolePadSnapshot: Equatable {
     /// 150 ms whatever it hid before, one that takes a yielded activation itself keeps it hidden (issue #380). Only with the pointer hidden
     /// (DM_CURSOR_HIDDEN), as the game hides it before it activates itself then.
     static func yieldTarget(environment: [String: String], appPath: String) -> String? {
-        guard environment["DM_CURSOR_HIDDEN"] == "1" else { return nil }
+        // An app nxkit built over the console (NXKIT_OVERLAY) is never activated by LaunchServices: active before its window
+        // exists, it would take the player to the desktop. It takes the front itself when its picture shows.
+        guard environment["DM_CURSOR_HIDDEN"] == "1" || environment["NXKIT_OVERLAY"] == "1" else { return nil }
         return Bundle(url: URL(fileURLWithPath: appPath))?.bundleIdentifier
     }
 
