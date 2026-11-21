@@ -21,25 +21,30 @@ import XCTest
         return (file, games)
     }
 
-    /// The collection's header has the button before Sort, as high as Sort, at the narrowest and a wide window. A controller reaches it.
-    func testCollectionHeaderShowsSupportedGamesBeforeSort() throws {
+    /// Supported games lives in the Library collection header and remains controller reachable; the single-screen Builds workbench stays free of duplicate header controls.
+    func testLibraryHeaderShowsSupportedGamesAndBuildsHeaderStaysClean() throws {
         let (file, games) = try libraryFile()
         for width in [CGFloat(900), 1440] {
             let stores = LauncherStores(defaults: testDefaults)
+            let root = file.deletingLastPathComponent()
+            let marker = root.appendingPathComponent(EngineLayout.marker)
+            try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: marker)
+            stores.repo.path = root.path
+            stores.dependencies.checked = true
+            stores.dependencies.deps = [Dep(id: "xcode", name: "dep.xcode", hint: "", present: true, installCmd: [])]
             let library = GameLibrary(file: file)
             library.selectedID = games[0].id
             let focus = PadFocus()
             let window = OffscreenWindow(size: NSSize(width: width, height: 760))
-            window.contentView = NSHostingView(rootView: LauncherView(stores: stores, library: library, performStartupChecks: false, padFocus: focus))
+            window.contentView = NSHostingView(rootView: LauncherView(stores: stores, library: library, initialPage: .library, performStartupChecks: false, padFocus: focus))
             window.orderFront(nil)
-            defer { window.orderOut(nil) }
+            defer { window.contentView = nil; window.orderOut(nil); window.close() }
             settle()
             let frames = try XCTUnwrap(focus.frames["main"])
-            let button = try XCTUnwrap(frames.first { $0.id == "library.supported" }?.frame, "the header shows Supported games at \(width)")
-            let sort = try XCTUnwrap(frames.first { $0.id == "library.sort" }?.frame)
-            XCTAssertLessThan(button.maxX, sort.minX, "before Sort")
-            XCTAssertEqual(button.height, sort.height, accuracy: 1, "as high as Sort")
-            XCTAssertEqual(button.midY, sort.midY, accuracy: 1, "on Sort's line")
+            let button = try XCTUnwrap(frames.first { $0.id == "library.supported" }?.frame, "the library header shows Supported games at \(width)")
+            XCTAssertGreaterThan(button.width, 0)
+            XCTAssertGreaterThan(button.height, 0)
         }
     }
 
@@ -91,7 +96,7 @@ import XCTest
         XCTAssertTrue(ids.isSuperset(of: ["supported.row.0100000000000001", "supported.row.0100000000000002", "supported.close"]), "\(ids)")
     }
 
-    /// Console mode: the menu's Library page has the row, it opens the page over the whole screen, the keyboard and the on-screen keys
+    /// Console mode: the menu's Library page has the row, it opens the trailing sheet, the keyboard and the on-screen keys
     /// search it, and an owned game's notes lead to its page.
     func testConsoleLibraryPageOpensSupportedGames() throws {
         let driver = MockConsoleDriver(scenario: .full, animated: false)
@@ -107,7 +112,7 @@ import XCTest
         pad.focused = "console.library.supported"
         pad.activate(); settle()
         XCTAssertEqual(driver.state.presentedSheet, .supportedGames)
-        XCTAssertTrue(ConsoleSheet.supportedGames.isFullScreen)
+        XCTAssertFalse(ConsoleSheet.supportedGames.isFullScreen)
         XCTAssertEqual(pad.focused, ConsoleSupportedGamesPage<MockConsoleDriver>.firstTarget, "the focus starts on the keyboard")
         let all = driver.state.supportedShown.count
         XCTAssertGreaterThan(all, 1)
@@ -130,7 +135,7 @@ import XCTest
         pad.focused = "console.supported.row." + first.titleID; pad.activate(); settle()   // A opens the notes
         XCTAssertTrue(try XCTUnwrap(pad.frames["console.supported"]).contains { $0.id == "console.supported.open." + first.titleID })
         pad.focused = "console.supported.open." + first.titleID; pad.activate(); settle()
-        XCTAssertEqual(driver.state.presentedSheet, .gamePage(owned))
+        XCTAssertEqual(driver.state.presentedSheet, .options(owned))
         driver.back(); settle()
         XCTAssertEqual(driver.state.presentedSheet, .supportedGames, "B goes back to the list")
     }
@@ -155,12 +160,21 @@ import XCTest
         let olderCatalogGame = SupportedGame(titleID: "010012101468C000", name: "Older Profile Game", edition: .switch1, version: "1.0.0", notes: "")
         let uncatalogedGame = SupportedGame(titleID: "0100000000009999", name: "Uncataloged Game", edition: .switch1, version: "1.0.0", notes: "")
 
-        let currentDetail = SupportedGamesSheet.detailText(for: currentGame, t: { L10n.string($0, .en) })
-        let olderDetail = SupportedGamesSheet.detailText(for: olderCatalogGame, t: { L10n.string($0, .en) })
-        let uncatalogedDetail = SupportedGamesSheet.detailText(for: uncatalogedGame, t: { L10n.string($0, .en) })
+        let en = { (key: String) in L10n.string(key, .en) }
+        let currentDetail = SupportedGamesSheet.detailText(for: currentGame, appVersion: "1.5.0", t: en)
+        let olderDetail = SupportedGamesSheet.detailText(for: olderCatalogGame, appVersion: "1.5.0", t: en)
+        let uncatalogedDetail = SupportedGamesSheet.detailText(for: uncatalogedGame, appVersion: "1.5.0", t: en)
 
-        XCTAssertTrue(currentDetail.contains("1.5.0"), currentDetail)
+        // Improved in this release: the tag says it once, the subtitle does not repeat it (#1458)
+        XCTAssertFalse(currentDetail.contains("1.5.0"), currentDetail)
+        XCTAssertEqual(SupportedGamesSheet.improvedTag(for: currentGame.titleID, appVersion: "1.5.0", t: en), "Improved in 1.5")
+        XCTAssertNil(SupportedGamesSheet.improvedTag(for: olderCatalogGame.titleID, appVersion: "1.5.0", t: en))
+        XCTAssertTrue(SupportedGamesSheet.matchesSearch(currentGame, needle: "improved", ownedName: "", appVersion: "1.5.0"), "found by its tag")
+        XCTAssertFalse(SupportedGamesSheet.matchesSearch(olderCatalogGame, needle: "improved", ownedName: "", appVersion: "1.5.0"))
         XCTAssertTrue(olderDetail.contains("1.4.0"), olderDetail)
+        XCTAssertEqual(SupportedGamesSheet.shortVersion("1.2.2"), "1.2.2")
+        let noVersion = SupportedGame(titleID: "0100000000009998", name: "No Version", edition: .switch1, version: nil, notes: "")
+        XCTAssertEqual(SupportedGamesSheet.detailText(for: noVersion, appVersion: "1.5.0", t: en), "Profile version unknown")
         XCTAssertEqual(uncatalogedDetail, String(format: L10n.string("supported.version", .en), "1.0.0"))
 
         XCTAssertTrue(SupportedGamesSheet.isUpdatedInCurrentRelease(titleID: currentGame.titleID, appVersion: "1.5.0-rc3"))

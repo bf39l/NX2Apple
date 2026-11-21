@@ -15,6 +15,7 @@ extension BuildStore {
         selectedTitleID = nil
         queuedExportIPA = nil
         queuedExportOneGame = nil
+        queuedExportFramework = nil
         runBuild()
     }
 
@@ -28,8 +29,14 @@ extension BuildStore {
             fastRefreshExternalImgPath = nil
             return
         }
+        if isMacOnlyUpstreamSelected, target != BuildTarget.mac {
+            fastRefreshExternalImgPath = nil
+            doneNote = t(macOnlyNoteKey)
+            done = false
+            return
+        }
         // The shared app needs a device this Mac knows. Found out here, before an hour of building, not after it.
-        if target != BuildTarget.mac, !shellDeviceChecked, !exportsShell {
+        if target != BuildTarget.mac, !isS2ArmSelected, !isNxkitSelected, !shellDeviceChecked, !exportsShell {
             guard installsDirectly else {
                 fastRefreshExternalImgPath = nil
                 doneNote = t("shell.needsDevice")
@@ -42,7 +49,7 @@ extension BuildStore {
         shellDeviceChecked = false
         let skipStale = skipStaleCheckForQueuedEntry
         skipStaleCheckForQueuedEntry = false
-        if target != BuildTarget.mac, !exportsOneGame, !skipStale, askAboutStaleFrameworks() {
+        if target != BuildTarget.mac, !isS2ArmSelected, !isNxkitSelected, !exportsOneGame, !exportsFramework, !skipStale, askAboutStaleFrameworks() {
             fastRefreshExternalImgPath = nil
             return
         }   // StaleFrameworksPrompt.swift (#449)
@@ -70,15 +77,64 @@ extension BuildStore {
         installedOn = ""
         installedAppPath = ""
         exportedIPAPath = ""
+        if !deferShellPackaging {
+            needsReplaceOldImgReminder = false
+            updatedImgPath = ""
+        }
         send = .idle
-        guard repo.isRepo else {
-            fail(repo.path.isEmpty ? t("msg.repoInvalidEmpty") : String(format: t("msg.repoInvalid"), shortPath(repo.path)))
+        mngRun = false
+        s2armRun = false
+        s2armEventsPath = ""
+        nxkitRun = false
+        nxkitFeedback = nil   // the last build's question goes with its result (#1460)
+        if isMacNativeGamesSelected {
+            startMacNativeGamesBuild()
             return
         }
-        // The experimental builder runs `nxb build` and never the script: no nxb, or one too old, stops here (#749). A game nxb does not take ends with its own exit code 4
-        nxbRun = ExperimentalBuilder.featureEnabled && experimentalBuilder
-        if let why = experimentalBuilderProblem() {
-            fail(why)
+        if isNxkitSelected {
+            if let why = nxkitProblem() {
+                fail(why)
+                return
+            }
+            nxkitRun = true
+            let tidHex = buildKey
+            // The work folder is a cache of the game (a second build reuses its stages). The app is built in the output folder's `<id>_build` and placed beside it.
+            let workDir = NxkitBuilder.workDirectory(home: home, key: tidHex)
+            let appFolder = (outDir.isEmpty ? inputFolder : outDir) + "/" + tidHex + "_build"
+            if cloudFolderCheck(appFolder) {
+                failure = BuildFailure(kind: .cloudFolder, gameName: nil, detail: appFolder)
+                fail(failureWhat(failure!))
+                return
+            }
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: workDir, withIntermediateDirectories: true)
+            try? fm.createDirectory(atPath: appFolder, withIntermediateDirectories: true)
+            let nup = gameFolder?.nup
+            var input = inputFolder
+            if nup == nil {
+                guard let folder = nxkitSourceFolder(workDir: workDir) else {
+                    fail(t("msg.stagingFailed"))
+                    return
+                }
+                input = folder
+            }
+            let macOutput = MacAppOutput(workDir: URL(fileURLWithPath: appFolder), key: tidHex, titleID: gameTitleID, preferred: macAppPath)
+            oneGameIPAPath = ""
+            macAppPath = ""
+            effectiveWorkDir = workDir
+            guard let launch = nxkitLaunch(input: input, nup: nup, workDir: workDir, outputAppPath: macOutput.builderURL.path) else {
+                fail(t("nxkit.missing"))
+                return
+            }
+            startBuildProcess(launch: launch, envCleanup: nil, macOutput: macOutput)
+            return
+        }
+        if isS2ArmSelected {
+            startS2ArmBuild()
+            return
+        }
+        guard repo.isRepo else {
+            fail(repo.path.isEmpty ? t("msg.repoInvalidEmpty") : String(format: t("msg.repoInvalid"), shortPath(repo.path)))
             return
         }
         // Resolve the interpreter here if the dependency check has not landed yet. checkDeps()
@@ -108,7 +164,7 @@ extension BuildStore {
         // folder"), even when only the base game was picked (issue #58, ufooer's PR #31).
         // A game folder (BuildStore+GameFolder.swift) goes to the script as it is: the engine must have its packer and the game's profile.
         let folder = gameFolder
-        if let folder, !nxbRun, let why = gameFolderEngineProblem(folder) {
+        if let folder, let why = gameFolderEngineProblem(folder) {
             fail(why)
             return
         }   // nxb reads the folder itself
@@ -146,7 +202,7 @@ extension BuildStore {
         }
         // The shared app's own folder is decided before the long steps too: one on a read-only volume (a saved
         // /NX2Apple-shell, a DMG chosen as Save to) failed at the last step after the whole build (#492).
-        if target != BuildTarget.mac, !exportsOneGame, let why = shellRootProblem() {
+        if target != BuildTarget.mac, !exportsOneGame, !exportsFramework, let why = shellRootProblem() {
             fail(why)
             return
         }
@@ -172,7 +228,7 @@ extension BuildStore {
         // option and would stop with "unrecognized arguments" (issue #5), so ask the script. Without
         // it the script's own default (<input>/<title ID>_build) is used and the archive step follows
         // whatever folder the build reports.
-        let hasWorkDir = nxbRun || RepoLayout.supportsWorkDir(repo.path)
+        let hasWorkDir = RepoLayout.supportsWorkDir(repo.path)
         if !hasWorkDir {
             say(t("msg.noWorkDir"))
         }
@@ -183,7 +239,7 @@ extension BuildStore {
             let e = ($0 as NSString).pathExtension.lowercased()
             return e == "nsz" || e == "xcz"
         }
-        if compressed, !nxbRun, !Toolchain.runOK(py, ["-c", "import nsz"]) {   // nxb reads NSZ itself
+        if compressed, !Toolchain.runOK(py, ["-c", "import nsz"]) {
             say(t("msg.installingNsz"))
             let r = runner.runCaptured([py, "-m", "pip", "install", "nsz"],
                                      env: ["PATH": BuildCommands.toolPath(python: py),
@@ -217,8 +273,7 @@ extension BuildStore {
         if hasWorkDir { args += ["--work-dir", workDir] }
         // The image of this game the other platform's build left (the iPhone build's games/<id>/romfs.img, the Mac app's): the
         // script takes it in place of extracting the RomFS again once it checks out as this version's (#708). A game folder is packed, not extracted.
-        // Only for the script: the experimental builder gets these arguments too, and `nxb build` has no such option (0.6.3 and 0.6.4 stop at it).
-        if folder == nil, !nxbRun, RepoLayout.supportsRomfsFrom(repo.path) {
+        if folder == nil, RepoLayout.supportsRomfsFrom(repo.path) {
             var reusable = RomFSArchive.reusableImages(root: outDir.isEmpty ? baseDir : outDir, key: tidHex)
             if let extImg = fastRefreshExternalImgPath, !reusable.contains(extImg), FileManager.default.fileExists(atPath: extImg) {
                 reusable.append(extImg)
@@ -235,7 +290,7 @@ extension BuildStore {
         } else if let macOutput {
             macAppPath = ""
             args += ["--platform", "mac-app", "-o", macOutput.builderURL.path]
-            if !nxbRun, RepoLayout.supportsFallbackIcon(repo.path) { args += macFallbackIconArguments(tidHex) }
+            if RepoLayout.supportsFallbackIcon(repo.path) { args += macFallbackIconArguments(tidHex) }
         } else {
             // Only the game's framework: the one shared app is made and signed after the script (installShell)
             args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
@@ -258,10 +313,11 @@ extension BuildStore {
         // is the per-user temp folder whether or not the app's own environment carries one.
         var denv = toolEnvironment(python: py)
         if !oneGameIPAPath.isEmpty { denv.merge(OneGameIPA.environment) { $1 } }
-        let launch = nxbRun
-            ? experimentalLaunch(nxb: experimentalBuilderBinary ?? "", scriptArguments: args, engine: engine, environment: denv, python: py)   // BuildStore+Builder.swift (#749)
-            : ProcessLaunch(executable: py, arguments: args, environment: denv, directory: engine, groupPython: py)
-        let envCleanup = tempEnvURL
+        let launch = ProcessLaunch(executable: py, arguments: args, environment: denv, directory: engine, groupPython: py)
+        startBuildProcess(launch: launch, envCleanup: tempEnvURL, macOutput: macOutput)
+    }
+
+    func startBuildProcess(launch: ProcessLaunch, envCleanup: URL?, macOutput: MacAppOutput?) {
         let utf8 = UTF8StreamDecoder.Locked()
         let onExit: @Sendable (Int32) -> Void = { [weak self] status in
             if let envCleanup { try? FileManager.default.removeItem(at: envCleanup) }
@@ -274,6 +330,11 @@ extension BuildStore {
                     self.fastRefreshExternalImgPath = nil
                     self.markAllDone()
                     self.finishMacApp(macOutput)
+                    return
+                }
+                if status == 0, !self.stopping, self.s2armRun {
+                    self.fastRefreshExternalImgPath = nil
+                    self.finishS2ArmBuild()
                     return
                 }
                 self.running = false
@@ -300,21 +361,33 @@ extension BuildStore {
                         let tid = ShellInstall.titleID(ofFramework: fw)
                         self.packArchive(workDir: self.effectiveWorkDir, titleID: tid) {
                             if self.deferShellPackaging { self.deferShellPackage(framework: fw, titleID: tid, name: name, archive: $0) }
+                            else if self.exportsFramework { self.exportFrameworkBundle(framework: fw, titleID: tid, name: name) }
                             else if self.exportsShell { self.exportShell(framework: fw, titleID: tid, name: name) }
                             else { self.installShell(framework: fw, titleID: tid, name: name, archive: $0) }
                         }
                     }
                 } else {
                     self.fastRefreshExternalImgPath = nil
-                    if self.nxbRun {
-                        // nxb's own exit code and message, as they are: there is no script to run instead (#749)
-                        let note = self.experimentalFailureNote(status: status)
+                    if self.s2armRun {
+                        let note = self.s2armFailureNote(status: status)
                         if let i = self.stages.lastIndex(where: { $0.state == .running }) {
                             self.stages[i].state = .failed
                             self.stages[i].detail = String(format: self.t("msg.exitCode"), status)
                         }
                         self.doneNote = note
                         self.say("✗ " + note)
+                    } else if self.mngRun {
+                        let note = self.macNativeGamesFailureNote(status: status)
+                        if let i = self.stages.lastIndex(where: { $0.state == .running }) {
+                            self.stages[i].state = .failed
+                            self.stages[i].detail = String(format: self.t("msg.exitCode"), status)
+                        }
+                        self.doneNote = note
+                        self.say("✗ " + note)
+                        self.noteFailure()
+                    } else if self.nxkitRun {
+                        // nxb's own exit code and its last lines, as they are: there is no script to run instead (#1460)
+                        self.finishFailedNxkitBuild(status: status)   // BuildStore+Nxkit.swift
                     } else if let i = self.stages.lastIndex(where: { $0.state == .running }) {
                         self.stages[i].state = .failed
                         self.stages[i].detail = String(format: self.t("msg.exitCode"), status)
@@ -351,13 +424,21 @@ extension BuildStore {
     @discardableResult
     func finishMacApp(_ output: MacAppOutput) -> Task<Void, Never> {
         let workDir = effectiveWorkDir.isEmpty ? output.workDirectoryURL.path : effectiveWorkDir
+        let preserveExternalWork = mngRun || s2armRun || nxkitRun   // nxkit's work folder is a cache of the game
+        let appFolderToTidy = nxkitRun ? output.workDirectoryURL : nil
         archiveGeneration &+= 1
         let generation = archiveGeneration
         return Task {
             do {
                 let app = try await Task.detached {
                     let placed = try output.finish()
-                    PostBuildCleanup.cleanWorkDirectory(workDir, removeExtractedRomFS: true, removeShellFramework: true)
+                    if !preserveExternalWork {
+                        PostBuildCleanup.cleanWorkDirectory(workDir, removeExtractedRomFS: true, removeShellFramework: true)
+                    }
+                    // nxb built the app in `<id>_build` and the output placed it beside: that folder is empty now
+                    if let appFolderToTidy, ((try? FileManager.default.contentsOfDirectory(atPath: appFolderToTidy.path)) ?? ["-"]).isEmpty {
+                        try? FileManager.default.removeItem(at: appFolderToTidy)
+                    }
                     return placed
                 }.value
                 guard archiveGeneration == generation, !stopping else { return }
@@ -367,6 +448,7 @@ extension BuildStore {
                 guard archiveGeneration == generation else { return }
                 done = true
                 doneNote = t("msg.macAppDone")
+                if nxkitRun { finishNxkitBuild(app: app) }   // BuildStore+Nxkit.swift: the game's record and "Did it work?"
                 running = false
                 cleanupStaging()
             } catch MacAppOutput.FinishError.retainedApp(let app, let cause) {

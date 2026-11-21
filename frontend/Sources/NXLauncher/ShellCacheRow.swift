@@ -24,17 +24,19 @@ package struct ShellCacheRow: View {
         VStack(alignment: .leading, spacing: 0) {
             CardRow(loc.t("shellCache.row"), detail: loc.t("shellCache.note"), detail2: build.shortPath(path)) {
                 Button(loc.t("shellCache.open")) { build.revealFolder(URL(fileURLWithPath: path)) }
+                    .padTarget("set.cacheOpen", scope: "main") { build.revealFolder(URL(fileURLWithPath: path)) }
                     .buttonStyle(LauncherSecondaryButtonStyle())
                 Button(loc.t("shellCache.move")) { pickFolder() }
                     .buttonStyle(LauncherSecondaryButtonStyle())
                     .disabled(build.running)
-                    .padTarget("set.cacheMove", scope: "main") { if !build.running { pickFolder() } }
+                    .padTarget("set.cacheMove", scope: "main", enabled: !build.running) { if !build.running { pickFolder() } }
             }
             if !build.shellCacheIsDefault, build.shellMove == .idle {
                 Button(loc.t("shellCache.useDefault")) { build.prepareShellMoveToDefault() }
-                    .buttonStyle(.plain).font(.manrope(12.5, .semibold)).foregroundStyle(LauncherPalette.ready)
+                    .buttonStyle(LauncherSecondaryButtonStyle())
                     .disabled(build.running)
-                    .padding(.leading, axis).padding(.top, -5).padding(.bottom, 13)
+                    .padTarget("set.cacheDefault", scope: "main", enabled: !build.running) { if !build.running { build.prepareShellMoveToDefault() } }
+                    .frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 18).padding(.bottom, 13)
             }
             if build.shellMove != .idle {
                 panel.padding(.leading, axis).padding(.trailing, 18).padding(.bottom, 14)
@@ -64,10 +66,10 @@ package struct ShellCacheRow: View {
                 VStack(alignment: .leading, spacing: 8) {
                     LauncherProgressBar(value: total > 0 ? Double(done) / Double(total) : 0, height: 6).frame(height: 6)
                     Text(String(format: loc.t(key), ShellInstall.sizeText(done), ShellInstall.sizeText(total)))
-                        .font(.manrope(12.5)).monospacedDigit().foregroundStyle(LauncherPalette.secondaryText)
+                        .font(DS.Font.callout).monospacedDigit().foregroundStyle(LauncherPalette.secondaryText)
                 }
                 footer(.info, loc.t("shellCache.movingNote")) {
-                    button(loc.t("btn.stop"), accent: LauncherPalette.building) { build.stopShellMove() }
+                    button(loc.t("btn.stop"), id: "stop", accent: LauncherPalette.building) { build.stopShellMove() }
                 }
             case .moved(let root):
                 footer(.done, String(format: loc.t("shellCache.moved"), build.shortPath(root))) { ok }
@@ -86,7 +88,7 @@ package struct ShellCacheRow: View {
     }
 
     @ViewBuilder private func confirmation(_ plan: ShellRootMove.Plan) -> some View {
-        Text(loc.t("shellCache.confirmTitle")).font(.manrope(14, .semibold))
+        Text(loc.t("shellCache.confirmTitle")).font(DS.Font.bodyStrong)
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 6) {
             fact("shellCache.from", build.shortPath(plan.source), path: true)
             fact("shellCache.to", build.shortPath(plan.destination), path: true)
@@ -102,16 +104,16 @@ package struct ShellCacheRow: View {
         }
         if build.running { note(.warning, loc.t("shellCache.busy")) }
         buttons {
-            button(loc.t("saves.cancel")) { build.dismissShellMove() }
+            button(loc.t("saves.cancel"), id: "cancel") { build.dismissShellMove() }
             if plan.problem == nil {
-                button(loc.t("shellCache.go"), accent: LauncherPalette.ready, enabled: !build.running) { build.confirmShellMove() }
+                button(loc.t("shellCache.go"), id: "confirm", accent: LauncherPalette.ready, enabled: !build.running) { build.confirmShellMove() }
             }
         }
     }
 
     private func fact(_ key: String, _ value: String, path: Bool = false) -> some View {
         GridRow {
-            Text(loc.t(key)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.secondaryText)
+            Text(loc.t(key)).font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary)
             Text(value).font(path ? .mono(12) : .manrope(12.5, .semibold)).monospacedDigit()
                 .lineLimit(1).truncationMode(.middle).help(value)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -132,7 +134,7 @@ package struct ShellCacheRow: View {
         }
     }
 
-    private var ok: some View { button(loc.t("library.ok")) { build.dismissShellMove() } }
+    private var ok: some View { button(loc.t("library.ok"), id: "done") { build.dismissShellMove() } }
 
     /// A note with its button beside it, on one line when it fits: the progress and the results.
     private func footer<Content: View>(_ kind: NoteKind, _ text: String, @ViewBuilder _ content: () -> Content) -> some View {
@@ -143,8 +145,9 @@ package struct ShellCacheRow: View {
         HStack(spacing: 10) { Spacer(minLength: 0); content() }
     }
 
-    private func button(_ title: String, accent: Color? = nil, enabled: Bool = true, _ perform: @escaping () -> Void) -> some View {
+    private func button(_ title: String, id: String, accent: Color? = nil, enabled: Bool = true, _ perform: @escaping () -> Void) -> some View {
         Button(title, action: perform).buttonStyle(LauncherSecondaryButtonStyle(accent: accent)).disabled(!enabled).fixedSize()
+            .padTarget("set.cache." + id, scope: "main", enabled: enabled, activate: perform)
     }
 
     private enum NoteKind { case done, info, warning, blocked }
@@ -153,15 +156,15 @@ package struct ShellCacheRow: View {
     private func note(_ kind: NoteKind, _ text: String) -> some View {
         let (symbol, color): (String, Color) = {
             switch kind {
-            case .done: return ("checkmark.circle.fill", LauncherPalette.ready)
-            case .info: return ("info.circle", .secondary)
-            case .warning: return ("exclamationmark.triangle.fill", LauncherPalette.building)
-            case .blocked: return ("exclamationmark.triangle.fill", .red)
+            case .done: return (DSTone.success.symbol, DSTone.success.color)   // one symbol per tone (DSTone)
+            case .info: return (DSTone.info.symbol, DS.Color.symbolDefault)
+            case .warning: return (DSTone.warning.symbol, DSTone.warning.color)
+            case .blocked: return (DSTone.error.symbol, DSTone.error.color)
             }
         }()
         return HStack(alignment: .firstTextBaseline, spacing: 7) {
             Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).foregroundStyle(color).frame(width: 13)
-            Text(text).font(.manrope(12.5)).foregroundStyle(kind == .done || kind == .info ? Color.secondary : color)
+            Text(text).font(DS.Font.callout).foregroundStyle(kind == .done || kind == .info ? Color.secondary : color)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }

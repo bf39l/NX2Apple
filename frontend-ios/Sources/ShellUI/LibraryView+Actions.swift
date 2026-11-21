@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(PhotosUI)
+import PhotosUI
+#endif
 
 /// The library's actions, panels opening and closing, and the focus rules.
 extension LibraryView {
@@ -35,6 +38,49 @@ extension LibraryView {
         a.onRestoreSaveBackup = { if !echo() { o.onRestoreSaveBackup($0) } }
         a.onDeleteGame = { if !echo() { o.onDeleteGame($0, $1) } }
         a.onOpenHomeButtonSettings = { if !echo() { o.onOpenHomeButtonSettings() } }
+        a.onCopyShortcutURL = o.onCopyShortcutURL.map { copy in
+            { if !echo() { copy($0) } }
+        }
+        if let add = o.onAddToHomeScreen {
+            a.onAddToHomeScreen = { @MainActor id in
+                guard !gate.isSystemEcho else { return false }
+                return await add(id)
+            }
+        }
+        if let addWithGuide = o.onAddToHomeScreenWithGuide {
+            a.onAddToHomeScreenWithGuide = { @MainActor id, floatingGuide in
+                guard !gate.isSystemEcho else { return false }
+                return await addWithGuide(id, floatingGuide)
+            }
+        }
+        a.onSaveCustomCover = o.onSaveCustomCover.map { save in
+            { id, data in if !echo() { save(id, data) } }
+        }
+        a.onResetCustomCover = o.onResetCustomCover.map { reset in
+            { id in if !echo() { reset(id) } }
+        }
+        if let pickCert = o.onPickSideloadCertificateFile {
+            a.onPickSideloadCertificateFile = { @MainActor in
+                guard !gate.isSystemEcho else { return .cancelled }
+                return await pickCert()
+            }
+        }
+        if let confirmCert = o.onConfirmSideloadCertificatePassword {
+            a.onConfirmSideloadCertificatePassword = { @MainActor password in
+                guard !gate.isSystemEcho else { return nil }
+                return await confirmCert(password)
+            }
+        }
+        if let cancelCert = o.onCancelSideloadCertificateImport {
+            a.onCancelSideloadCertificateImport = { @MainActor in
+                if !gate.isSystemEcho { cancelCert() }
+            }
+        }
+        if let removeCert = o.onRemoveSideloadCertificate {
+            a.onRemoveSideloadCertificate = { @MainActor in
+                if !gate.isSystemEcho { removeCert() }
+            }
+        }
         return a
     }
     /// An action that did not come from a controller or key came from touch: hints and focus ring step back. False when
@@ -118,6 +164,93 @@ extension LibraryView {
         guard !fromSystemEcho else { return }
         restoreBackupGameID = nil
         menuActions.onRestoreSaveBackup(id)
+    }
+    func openHomeScreen(_ id: String) {
+        guard noteTouch() else { return }
+        returnFocus = focus.id
+        homeScreenGameID = id
+        focus.id = "hsc.save"
+    }
+    func closeHomeScreen() {
+        guard !fromSystemEcho else { return }
+        homeScreenGameID = nil
+        focus.id = returnFocus
+    }
+    var activeCoverCrop: CoverCropSession? {
+        coverCropInSheetSession ?? coverCropSession
+    }
+    func openCoverPicker(_ id: String) {
+        guard noteTouch(), actions.supportsCustomCover else { return }
+        coverPickerGameID = id
+        coverPickerGeneration &+= 1
+        if menuPresented {
+            coverPickerInSheetPresented = true
+        } else {
+            coverPickerPresented = true
+        }
+    }
+    func resetCustomCover(_ id: String) {
+        guard noteTouch() else { return }
+        actions.onResetCustomCover?(id)
+    }
+    func confirmCoverCrop(_ jpegData: Data, for gameID: String) {
+        guard !fromSystemEcho else { return }
+        coverCropSession = nil
+        coverCropInSheetSession = nil
+        focus.id = returnFocus
+        actions.onSaveCustomCover?(gameID, jpegData)
+    }
+    func closeCoverCrop() {
+        guard !fromSystemEcho else { return }
+        coverCropSession = nil
+        coverCropInSheetSession = nil
+        focus.id = returnFocus
+    }
+    #if canImport(PhotosUI)
+    func handlePickedCoverPhoto(_ item: PhotosPickerItem) {
+        guard let gameID = coverPickerGameID else { return }
+        let generation = coverPickerGeneration
+        let inSheet = menuPresented
+        Task {
+            let rawData = try? await item.loadTransferable(type: Data.self)
+            let decoded: CGImage?
+            if let rawData {
+                decoded = await Task.detached(priority: .userInitiated) {
+                    CoverImageProcessor.decodeNormalizedImage(from: rawData)
+                }.value
+            } else {
+                decoded = nil
+            }
+            guard coverPickerGeneration == generation, let decoded else { return }
+            let title = games.first(where: { $0.id == gameID })?.game.title ?? ""
+            let session = CoverCropSession(gameID: gameID, gameTitle: title, image: decoded)
+            returnFocus = focus.id
+            focus.id = "crp.done"
+            if inSheet && menuPresented {
+                coverCropInSheetSession = session
+            } else {
+                coverCropSession = session
+            }
+        }
+    }
+    #endif
+    func coverCropModal(_ session: CoverCropSession) -> some View {
+        CoverCropView(
+            gameTitle: session.gameTitle,
+            image: session.image,
+            allowsPhotoRepick: true,
+            onConfirm: { jpeg in confirmCoverCrop(jpeg, for: session.gameID) },
+            onCancel: { closeCoverCrop() }
+        )
+        .coordinateSpace(name: "shell")
+        .environment(\.shellFocus, focus)
+        .environment(\.shellFocusRefresh, focusRefresh)
+        .environment(\.shellIgnoresPress, { [gate] in gate.isSystemEcho })
+        .onPreferenceChange(FocusTargets.self) { targets.values = visibleTargets($0) }
+        .tint(ShellPalette.cream)
+        .preferredColorScheme(.dark)
+        .interactiveDismissDisabled()
+        .modifier(ShellKeyboardNavigation(active: true) { handle($0, from: .keyboard) })
     }
     /// The question starts on Cancel, with the saves kept.
     func openDelete(_ id: String) { guard noteTouch() else { return }; returnFocus = focus.id; deleteSaves = false; deleteGameID = id; focus.id = "del.cancel" }
@@ -203,7 +336,8 @@ extension LibraryView {
     }
     func back() {
         guard !fromSystemEcho else { return }
-        if buttonTestOpen { closeButtonTest() }
+        if activeCoverCrop != nil { closeCoverCrop() }
+        else if buttonTestOpen { closeButtonTest() }
         else if padMapping?.row != nil { closePadRow() }
         else if padMapping != nil { closePadMapping() }
         else if choice != nil { closeChoice() }
@@ -212,6 +346,7 @@ extension LibraryView {
         }
         else if helpGameID != nil { closeHelp() }
         else if restoreBackupGameID != nil { closeRestoreBackup() }
+        else if homeScreenGameID != nil { closeHomeScreen() }
         else if deleteGameID != nil { closeDelete() }
         else if controllersOpen { controllersOpen = false; retention.closed(.controllers, sheetStaysOpen: menuPresented); focus.id = settingsOpen ? "set.back" : "lib.controllers" }
         else if shellSettingsOpen { closeShellSettings() }
@@ -299,6 +434,7 @@ extension LibraryView {
     }
     /// The dialog or panel on top, in the order of `FocusLayer`.
     var topLayer: FocusLayer? {
+        if activeCoverCrop != nil { return .coverCrop }
         if buttonTestOpen { return .buttonTest }
         if padMapping != nil { return .padMapping }
         if choice != nil { return .choice }
@@ -307,6 +443,7 @@ extension LibraryView {
         if shellSettingsOpen { return .shellSettings }
         if helpGameID != nil { return .help }
         if restoreBackupGameID != nil { return .restoreBackup }
+        if homeScreenGameID != nil { return .homeScreen }
         if deleteGameID != nil { return .delete }
         if settingsOpen { return .settings }
         return nil
@@ -319,12 +456,14 @@ extension LibraryView {
         if let id = focus.id, id.hasPrefix("lib.tile.") { select(String(id.dropFirst("lib.tile.".count))) }
     }
     var defaultFocus: String? {
+        if activeCoverCrop != nil { return "crp.done" }
         if buttonTestOpen { return "test.close" }
         if let padMapping { return padMapping.row == nil ? "map.close" : "map.back" }
         if let choice { return "pick." + choice.row.value }
         if touchLayout != nil { return activeTargets.contains { $0.id == "lay.done" } ? "lay.done" : "lay.options" }
         if helpGameID != nil { return "help.done" }
         if restoreBackupGameID != nil { return "rst.cancel" }
+        if homeScreenGameID != nil { return "hsc.save" }
         if deleteGameID != nil { return "del.cancel" }
         if controllersOpen { return "ctl.close" }
         if shellSettingsOpen { return "shs.close" }

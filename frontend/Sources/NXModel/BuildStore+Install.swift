@@ -4,11 +4,78 @@ import NXCore
 
 // The install on a device after the archive: the shared app, the reinstall, the re-sign and the IPA (LNPANDY/NX2Apple#387).
 
+/// What the build reads from the device store: the device and the team to install on, the names, the listing of the teams, and the
+/// copy flow the install blocks on (its queue is not the main one, so those members are `nonisolated`).
+@MainActor package protocol InstallTarget: AnyObject {
+    var installDevice: String { get }
+    /// The paired devices the last listing found.
+    var devices: [AppleDevice] { get }
+    /// The signing teams the last listing found.
+    var teams: [SigningTeam] { get }
+    /// Whether the device/team listing has run at least once.
+    var checked: Bool { get }
+    var signingTeam: String { get }
+    /// The build exports the shared app as an IPA instead of installing it.
+    var exportIPA: Bool { get }
+    /// The export makes one game's own IPA with its game data inside (#540).
+    var exportOneGame: Bool { get }
+    /// The export makes a standalone `.framework` for the shared app without repacking the shell IPA.
+    var exportFramework: Bool { get }
+    /// Standalone `.framework` export explicitly skips codesigning (for sideloading / on-device signing).
+    var exportFrameworkUnsigned: Bool { get }
+    /// The folder the game data is copied to (a drive), empty when none is chosen.
+    var driveFolder: String { get set }
+    var xcrun: String { get }
+    var readTeams: @Sendable () -> [SigningTeam] { get }
+    var usbSpeedLookup: @Sendable (String) -> Int64? { get }
+    nonisolated var currentPostBuildTransferMode: PostBuildTransferMode { get }
+    func deviceName(_ udid: String) -> String
+    nonisolated func askCopy(_ plan: ShellCopyPlan) -> ShellCopyDecision
+    nonisolated func askCopy(_ plan: ShellCopyPlan, isCancelled: @escaping @Sendable () -> Bool) -> ShellCopyDecision
+    nonisolated func setWaiting(_ on: Bool)
+    nonisolated var waitCancelled: Bool { get }
+    func cancelCopy()
+    func copyEnded()
+    /// Reads the device listing again (a transfer asks it when a send failed, to tell a device that went away from a refusal).
+    func refreshDevices() async
+}
+
+extension InstallTarget {
+    package var teams: [SigningTeam] { [] }
+    package var checked: Bool { false }
+    package var exportFramework: Bool { false }
+    package var exportFrameworkUnsigned: Bool { false }
+    /// Single source of truth for the team used by standalone `.framework` export and displayed in `InstallCard`.
+    /// Empty means export unsigned.
+    package var effectiveFrameworkSigningTeam: String {
+        if exportFrameworkUnsigned { return "" }
+        let explicit = signingTeam.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !teams.isEmpty {
+            if !explicit.isEmpty, teams.contains(where: { $0.id == explicit }) {
+                return explicit
+            }
+            return teams.first(where: { $0.hasCertificate })?.id ?? teams.first?.id ?? ""
+        }
+        return checked ? "" : explicit
+    }
+    package var usbSpeedLookup: @Sendable (String) -> Int64? { { _ in nil } }
+    nonisolated package var currentPostBuildTransferMode: PostBuildTransferMode { .defaultMode }
+    nonisolated package func askCopy(_ plan: ShellCopyPlan, isCancelled: @escaping @Sendable () -> Bool) -> ShellCopyDecision {
+        isCancelled() ? .skip : askCopy(plan)
+    }
+    package func cancelCopy() {}
+    package func refreshDevices() async {}
+}
+
+extension DeviceStore: InstallTarget {
+    package func refreshDevices() async { await refresh().value }
+}
+
 extension BuildStore {
     // MARK: Installing on a device
 
     /// The installer with this store's tools, log, stages and process hand-off wired in. The install and the export (BuildStore+Export.swift) share it.
-    func makeInstaller() -> ShellInstaller {
+    func makeInstaller(respectSkipMode: Bool = true) -> ShellInstaller {
         let python = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
         var installer = ShellInstaller(xcrun: devices.xcrun, repo: repo.path, python: python, root: shellRoot, device: devices.installDevice, team: devices.signingTeam)
         installer.deviceName = devices.deviceName(devices.installDevice)
@@ -40,10 +107,24 @@ extension BuildStore {
         } }
         installer.runner = runner
         installer.processStarted = { @Sendable p in hop { self.proc = p } }
-        // The size and the connection are shown with Continue, "Wait for a cable" and "Not now" (ShellCopyCard)
+        // The size and the connection are shown with Start, "Wait for a cable" and "Not now" (ShellCopySheet)
         let target = devices
         let cancel = installCancel
-        installer.decideCopy = { plan in cancel.value ? .skip : target.askCopy(plan) }
+        installer.usbSpeedLookup = target.usbSpeedLookup
+        installer.decideCopy = { plan in
+            if cancel.value { return .skip }
+            let prompt: () -> ShellCopyDecision = {
+                target.askCopy(plan, isCancelled: { cancel.value })
+            }
+            switch target.currentPostBuildTransferMode {
+            case .skip:
+                return respectSkipMode ? .skip : prompt()
+            case .auto:
+                return plan.linkProfile.isConnected ? .copy : prompt()
+            case .ask:
+                return prompt()
+            }
+        }
         installer.waiting = { on in if !cancel.value || !on { target.setWaiting(on) } }
         installer.waitCancelled = { cancel.value || target.waitCancelled }
         return installer
@@ -62,7 +143,7 @@ extension BuildStore {
         if dataOnly { failure = nil; done = false; doneNote = "" }
         shellBatchRetry = nil
         shellRetry = (framework, titleID, name, archive)
-        let installer = makeInstaller()
+        let installer = makeInstaller(respectSkipMode: !dataOnly)
         let target = devices
         let device = devices.installDevice
         DispatchQueue.global(qos: .userInitiated).async {
@@ -91,6 +172,7 @@ extension BuildStore {
                 }
                 self.installedOn = device
                 self.installedAppPath = result.appPath
+                self.installedDataComplete = !result.copySkipped
                 self.finishInstall(nil, note: result.message)
             }
         }
@@ -103,6 +185,7 @@ extension BuildStore {
         beginOperation(.installing, game: nil, titleID: nil, destination: .target)
         stopping = false; stoppedByPlayer = false; installCancel.set(false); installPhaseActive = true
         running = true; done = false; doneNote = ""; failure = nil; stages = []
+        needsReplaceOldImgReminder = false; updatedImgPath = ""
         finderShown = false
         let installer = makeInstaller()
         let device = devices.installDevice
@@ -151,7 +234,7 @@ extension BuildStore {
             ShellInstaller.BatchGame(framework: $0.framework, titleID: $0.titleID, name: $0.name, archive: $0.archive,
                                      pickedArtwork: pickedArtworkForTitleID($0.titleID))
         }
-        let installer = makeInstaller()
+        let installer = makeInstaller(respectSkipMode: !dataOnly)
         let root = installer.root
         let target = devices
         let device = devices.installDevice
@@ -186,10 +269,13 @@ extension BuildStore {
                     } else if let step = result.step { self.noteInstallFailure(step, error: result.message) }
                     return
                 }
-                self.shellBatchRetry = nil
+                if !result.copySkipped {
+                    self.shellBatchRetry = nil
+                }
                 self.installedOn = device
                 self.installedAppPath = result.appPath
                 self.onBatchShellInstalled(games, result.appPath, device)
+                self.installedDataComplete = !result.copySkipped
                 self.finishInstall(nil, note: result.message)
             }
         }
@@ -226,7 +312,15 @@ extension BuildStore {
     package func finishInstall(_ failure: String?, note: String? = nil) {
         running = false
         done = failure == nil
-        doneNote = failure ?? note ?? String(format: t("dev.installed"), devices.deviceName(devices.installDevice))
+        var resolved = failure ?? note ?? String(format: t("dev.installed"), devices.deviceName(devices.installDevice))
+        if failure == nil, !deferShellPackaging, needsReplaceOldImgReminder {
+            let imgName = updatedImgPath.isEmpty ? "romfs.img" : (updatedImgPath as NSString).lastPathComponent
+            let reminder = String(format: t("imgGuide.replaceOldImgBody"), imgName)
+            if !resolved.contains(reminder) {
+                resolved = resolved.isEmpty ? reminder : (resolved + "\n" + reminder)
+            }
+        }
+        doneNote = resolved
         cleanupStaging()
     }
 
@@ -242,6 +336,7 @@ extension BuildStore {
         }
         buildingGame = false; runningTarget = BuildTarget.ios
         beginOperation(.installing, game: nil, titleID: nil, destination: .target)
+        needsReplaceOldImgReminder = false; updatedImgPath = ""
         running = true
         runTool(id: 1004, name: String(format: t("dev.reinstallStage"), devices.deviceName(device)),
                 BuildCommands.reinstallCommand(xcrun: devices.xcrun, device: device, app: app), nameKey: "dev.reinstallStage",
@@ -296,6 +391,7 @@ extension BuildStore {
         buildingGame = false; runningTarget = BuildTarget.ios
         beginOperation(.renewingSignature, game: nil, titleID: nil, destination: .target)
         stopping = false; stoppedByPlayer = false; installPhaseActive = true
+        needsReplaceOldImgReminder = false; updatedImgPath = ""
         running = true
         // The shared app is signed again under the identifier shell.json holds, so the device keeps its Documents
         let command = ShellInstall.buildCommand(xcrun: xcrun, root: shell.root, device: device, team: team, bundleID: bundle)
@@ -333,6 +429,7 @@ extension BuildStore {
                             if let installError {
                                 self.doneNote = String(format: self.t("dev.installFailed"), installError)
                             } else {
+                                ShellLibrary.recordInstalled(root: shell.root, device: device)
                                 self.installedOn = device
                                 self.installedAppPath = app
                                 self.doneNote = String(format: self.t("dev.resigned"), name)
@@ -409,6 +506,8 @@ extension BuildStore {
         beginOperation(.exportingIPA, game: nil, titleID: nil, destination: .none)
         stopping = false
         stoppedByPlayer = false
+        needsReplaceOldImgReminder = false
+        updatedImgPath = ""
         cancel.set(false)
         installPhaseActive = true
         running = true
