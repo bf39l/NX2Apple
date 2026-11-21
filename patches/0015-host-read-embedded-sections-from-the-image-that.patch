@@ -24,7 +24,7 @@ Issue: LNPANDY/NX2Apple#451
  create mode 100644 dm/host/host_image.h
 
 diff --git a/dm/gfx/gl/hle_gl.m b/dm/gfx/gl/hle_gl.m
-index aa398f8..30074e8 100644
+index d53fd62..14263c6 100644
 --- a/dm/gfx/gl/hle_gl.m
 +++ b/dm/gfx/gl/hle_gl.m
 @@ -26,8 +26,7 @@
@@ -37,7 +37,7 @@ index aa398f8..30074e8 100644
  #include <math.h>
  #include <stdatomic.h>
  #include <time.h>
-@@ -3318,7 +3317,7 @@ static void renderprogs_job(void) {
+@@ -3339,7 +3338,7 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
  // glVertexAttribPointerNV takes other arguments than glVertexAttribPointer, glGetProgramivARB asks about an ARB assembly program
  static void *gl_entry(const char *name) {
      static const hle_ent *sec; static unsigned long sz;
@@ -47,10 +47,10 @@ index aa398f8..30074e8 100644
      return NULL;
  }
 diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
-index d78cd34..42da3e5 100644
+index e84045f..b1df1c8 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
-@@ -40,8 +40,7 @@
+@@ -41,8 +41,7 @@
  #include <mach/thread_policy.h>
  #include <assert.h>
  #include <stdatomic.h>
@@ -60,7 +60,7 @@ index d78cd34..42da3e5 100644
  
  // ---------- Slot table, thunks, unimplemented stubs ----------
  typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
-@@ -97,7 +96,7 @@ static void nvn_init_slots(void) {
+@@ -98,7 +97,7 @@ static void nvn_init_slots(void) {
      static int done; if (done) return; done = 1;
      g_log = getenv("DM_NVN_LOG") != NULL;
      unsigned long sz;
@@ -70,10 +70,10 @@ index d78cd34..42da3e5 100644
      for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
      for (unsigned k = 0; k < nim; k++) {
 diff --git a/dm/gfx/tests/t_gl_imports.m b/dm/gfx/tests/t_gl_imports.m
-index 3b72101..f81d52f 100644
+index 3b22bee..a033a36 100644
 --- a/dm/gfx/tests/t_gl_imports.m
 +++ b/dm/gfx/tests/t_gl_imports.m
-@@ -1042,7 +1042,7 @@ int main(int argc, char **argv) {
+@@ -1214,7 +1214,7 @@ int main(int argc, char **argv) {
      if (fixture) test_argument_buffers(fixture);
  
      unsigned long sz;
@@ -86,7 +86,7 @@ diff --git a/dm/gfx/tests/t_registration.m b/dm/gfx/tests/t_registration.m
 index 17521a0..47820d2 100644
 --- a/dm/gfx/tests/t_registration.m
 +++ b/dm/gfx/tests/t_registration.m
-@@ -45,7 +45,7 @@ void thr_svc_leave(void) {}
+@@ -45,7 +45,7 @@ DM_REGISTER("swtest", odd_entry, odd_b, {"b", 47, NULL});
  
  static const void *section(const char *name, size_t size, size_t align, unsigned long *count) {
      unsigned long bytes = 0;
@@ -96,10 +96,10 @@ index 17521a0..47820d2 100644
      *count = bytes / size; return p;
  }
 diff --git a/dm/gfx/vk/hle_vk.m b/dm/gfx/vk/hle_vk.m
-index 0c066d9..d78e154 100644
+index 367f107..71087fd 100644
 --- a/dm/gfx/vk/hle_vk.m
 +++ b/dm/gfx/vk/hle_vk.m
-@@ -24,8 +24,7 @@
+@@ -25,8 +25,7 @@
  #import <Metal/Metal.h>
  #include <CommonCrypto/CommonDigest.h>
  #include <CoreFoundation/CoreFoundation.h>
@@ -109,7 +109,7 @@ index 0c066d9..d78e154 100644
  #include <math.h>
  #include <stdatomic.h>
  #include <time.h>
-@@ -2926,7 +2925,7 @@ static void frame_end(void) {
+@@ -2951,7 +2950,7 @@ VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {
  static void *vk_lookup(const char *name) {
      static const hle_ent *sec; static unsigned long sz;
      if (!name || strncmp(name, "vk", 2)) return NULL;
@@ -200,7 +200,7 @@ index 0000000..9dde850
 +extern const struct mach_header_64 __dso_handle;
 +#define DM_HOST_IMAGE (&__dso_handle)
 diff --git a/dm/host/loader.c b/dm/host/loader.c
-index ec5e0bb..eb50d6c 100644
+index 472088c..c590d42 100644
 --- a/dm/host/loader.c
 +++ b/dm/host/loader.c
 @@ -8,9 +8,8 @@
@@ -214,7 +214,7 @@ index ec5e0bb..eb50d6c 100644
  #if TARGET_OS_IPHONE
  #include <mach/mach.h>
  #endif
-@@ -242,7 +241,7 @@ static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *
+@@ -255,7 +254,7 @@ static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *
  static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
  static const unsigned k_force_disabled = UINT_MAX;
  static void force_init(void) {
@@ -223,7 +223,7 @@ index ec5e0bb..eb50d6c 100644
      g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
      g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
      unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
-@@ -795,7 +794,7 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
+@@ -808,7 +807,7 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
  }
  // The image the module sections are read from (front.h dm_set_game_image_header). getsectiondata takes any loaded image's header and applies its slide
  #include "front.h"

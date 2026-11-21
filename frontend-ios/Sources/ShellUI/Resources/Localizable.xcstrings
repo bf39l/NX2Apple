@@ -11713,6 +11713,70 @@
         }
       }
     },
+    "MacBook (16:10)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MacBook (16:10)"
+          }
+        }
+      }
+    },
     "Match screen": {
       "localizations": {
         "de": {
@@ -16385,70 +16449,6 @@
         }
       }
     },
-    "Renders about a quarter more pixels: a little slower and warmer.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Berechnet etwa ein Viertel mehr Pixel: etwas langsamer und wärmer."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Renders about a quarter more pixels: a little slower and warmer."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Renderiza aproximadamente un cuarto más de píxeles: algo más lento y más caliente."
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Calcule environ un quart de pixels en plus : un peu plus lent et plus chaud."
-          }
-        },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Calcola circa un quarto di pixel in più: un po’ più lento e più caldo."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "描画するピクセルが約 4 分の 1 増えます。少し遅くなり、発熱も少し増えます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "약 4분의 1 더 많은 픽셀을 렌더링하여 조금 느려지고 더 뜨거워집니다."
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Renderiza cerca de um quarto a mais de pixels: um pouco mais lento e mais quente."
-          }
-        },
-        "sv": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Renderar ungefär en fjärdedel fler pixlar: lite långsammare och varmare."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "渲染的像素约多四分之一：稍慢，发热稍多。"
-          }
-        }
-      }
-    },
     "Replace certificate": {
       "localizations": {
         "de": {
@@ -19389,6 +19389,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "游戏中用顶部中间的按钮切换。3D 另有十字键、L3 和 R3。"
+          }
+        }
+      }
+    },
+    "Taller shapes render more pixels and can increase GPU time and heat.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Höhere Bildformate rendern mehr Pixel und können GPU-Zeit und Wärmeentwicklung erhöhen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Taller shapes render more pixels and can increase GPU time and heat."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los formatos más altos renderizan más píxeles y pueden aumentar el tiempo de GPU y el calor."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les formats plus hauts affichent davantage de pixels et peuvent augmenter le temps GPU et la chaleur."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I formati più alti renderizzano più pixel e possono aumentare il tempo GPU e il calore."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "縦長の画面比率では描画するピクセルが増え、GPU の処理時間と発熱が増える場合があります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세로로 긴 화면 비율은 더 많은 픽셀을 렌더링하므로 GPU 처리 시간과 발열이 늘어날 수 있습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Formatos mais altos renderizam mais pixels e podem aumentar o tempo de GPU e o calor."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Högre bildformat renderar fler pixlar och kan öka GPU-tiden och värmeutvecklingen."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "较高的画面比例会渲染更多像素，可能增加 GPU 耗时和发热。"
           }
         }
       }

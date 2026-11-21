@@ -45,7 +45,7 @@ index 8fa01c0..166bd87 100644
  #include <math.h>
  
  enum { PAD_OFF, PAD_DPAD, PAD_LEFT_STICK, PAD_RIGHT_STICK, PAD_TOUCH };
-@@ -322,6 +323,21 @@ static void controller_reset_motion(DMController *d) {
+@@ -322,6 +323,21 @@ GCController *front_controllers_quit_buttons(int *home, int *a, int *b) {
      }
      return holder;
  }
@@ -68,7 +68,7 @@ index 8fa01c0..166bd87 100644
      int was_focused=g_focus, listening=controller_listening();
      g_focus=listening && !g_quit_prompt && !g_applet;
 diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
-index fde8888..38cbf2a 100644
+index 6e99087..abd1b7f 100644
 --- a/dm/host/front_mac.m
 +++ b/dm/host/front_mac.m
 @@ -1,7 +1,7 @@
@@ -351,7 +351,7 @@ index fde8888..38cbf2a 100644
  // The controller applet's prompt (front.h front_ctrl_support, ctrl_prompt.h; GitHub issue #1640): the game asked for more players than it sees, and the game's thread waits while
  // the prompt is up over the game, as the Switch's player screen. A controller that joins meanwhile is a player at once (its first button with DM_PAD_PRESS_TO_JOIN, its
  // connection without), and the count on the card follows. A and B are the physical buttons A and B on any controller (controllers_mac.m front_controllers_applet_buttons, as the Home
-@@ -1357,6 +1534,7 @@ void front_run(void (*guest)(void)) {
+@@ -1365,6 +1542,7 @@ void front_run(void (*guest)(void)) {
          NSString *keys = input_preference_map(input_preferences_domain(), "DM_KEYMAP", 0);
          if (keys) key_map_parse(&g_keys, keys.UTF8String);
          hq_start();
@@ -359,7 +359,7 @@ index fde8888..38cbf2a 100644
          front_controllers_start();
          hq_log_setting();
          [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue
-@@ -1383,8 +1561,8 @@ void front_run(void (*guest)(void)) {
+@@ -1391,8 +1569,8 @@ void front_run(void (*guest)(void)) {
          // DM_FOCUS_KEEP (on by default, =0 turns it off): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom and Ocarina of Time
          // stop presenting out of focus, so clicking into another app read as a hang (no frame and no sound after the last focus change)
          static int keep = -1; if (keep < 0) keep = !getenv("DM_FOCUS_KEEP") || atoi(getenv("DM_FOCUS_KEEP"));
@@ -798,10 +798,10 @@ index 0b716c4..0aa2164 100644
      }
      printf("t_home_quit_mac: %d checks, %d failed\n", checks, fails);
 diff --git a/docs/frontends.md b/docs/frontends.md
-index 27e008c..a67690e 100644
+index cf28b5e..5aac8e1 100644
 --- a/docs/frontends.md
 +++ b/docs/frontends.md
-@@ -57,7 +57,9 @@ A built app carries the settings its game supports, as the iPhone app's settings
+@@ -59,7 +59,9 @@ A built app carries the settings its game supports, as the iPhone app's settings
  
  A Mac app shows its own settings window before the game, drawn from its `launcher.json` and keeping its choices in the same store ([Saved choices](#saved-choices), [The Mac settings window](settings.md#the-mac-settings-window)). It shows a variable the launch environment or an `env.txt` sets as fixed. A front end that draws the settings itself starts the app with `DM_LAUNCHER=0` in its environment (or `--no-launcher` on its command line) to skip the window. The saved choices still apply, so a front end that writes them gets the same game as the window would. With `DM_PREFLIGHT` set in its environment the app exits at once, before it reads anything, rolls its log or touches the saves: a front end opens a new build that way (through LaunchServices, `NSWorkspace.openApplication`), so macOS runs its first-start check of the bundle then, not when the player starts the game. The check scans every file of an ad hoc signed app and takes minutes with a RomFS of several GB, and macOS remembers it until the app changes.
  
@@ -813,7 +813,7 @@ index 27e008c..a67690e 100644
  Settings a player chose in a front end and wants kept, also for a start from Finder or the Dock, go in the app's saved choices ([Saved choices](#saved-choices)), not in its environment.
  
 diff --git a/docs/playing.md b/docs/playing.md
-index 9b99136..63a0191 100644
+index 40dd0ac..9437438 100644
 --- a/docs/playing.md
 +++ b/docs/playing.md
 @@ -57,7 +57,7 @@ Two identical controllers that Apple's controller support lists as one, such as

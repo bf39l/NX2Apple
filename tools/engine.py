@@ -233,7 +233,8 @@ def build(root, eng, patches, sha):
         if (eng / tool).is_file():
             if out == 'docs/env_switches.tsv':
                 P.merge_env_switches(root, eng)
-            r = subprocess.run([sys.executable, '-X', 'utf8', str(eng / tool)], cwd=eng, capture_output=True, text=True, encoding='utf-8', errors='replace', check=False, env=P.clean_env())
+            args = ['--header'] if out == 'dm/gfx/nvn/dmsh_chain.h' else []
+            r = subprocess.run([sys.executable, '-X', 'utf8', str(eng / tool), *args], cwd=eng, capture_output=True, text=True, encoding='utf-8', errors='replace', check=False, env=P.clean_env())
             if r.returncode: raise Fail(f'{tool} failed on the patched tree: {(r.stderr.strip().splitlines() or [str(r.returncode)])[-1]}')
             if out == 'docs/env_switches.tsv':
                 chk = subprocess.run([sys.executable, '-X', 'utf8', str(eng / tool), '--check'], cwd=eng, capture_output=True, text=True, encoding='utf-8', errors='replace', check=False, env=P.clean_env())

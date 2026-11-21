@@ -25,6 +25,7 @@ import Testing
         "Version %@": ["de", "sv", "fr"],
         "Version": ["de", "sv", "fr"],
         "OK": ["de", "sv", "fr", "it", "ja"],
+        "MacBook (16:10)": ["de", "sv", "fr", "it", "ja"],             // the product name and aspect ratio
         "Switch 2": ["de", "sv", "fr", "it", "ja"],                      // the console's name
         "NX2Apple": ["de", "sv", "fr", "it", "ja"],                      // the app's name
     ]

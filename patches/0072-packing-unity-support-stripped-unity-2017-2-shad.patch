@@ -8,13 +8,12 @@ Register the Unity 2017.2 Shader hash using the 2017.4 layout with the two later
 Upstream-Status: forwarded seedds/nxnative#2649
 Reason: Read stripped Unity 2017.2 shaders
 Issue: seedds/nxnative#2649
-
 ---
  dm/gfx/tools/unityfs.py | 6 ++++++
  1 file changed, 6 insertions(+)
 
 diff --git a/dm/gfx/tools/unityfs.py b/dm/gfx/tools/unityfs.py
-index e55287ef..54952822 100644
+index e55287e..5495282 100644
 --- a/dm/gfx/tools/unityfs.py
 +++ b/dm/gfx/tools/unityfs.py
 @@ -223,6 +223,11 @@ Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int>

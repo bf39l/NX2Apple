@@ -22,7 +22,7 @@ index 55a9fe2..91ceee8 100644
  #include <stdatomic.h>
  #import "DmLayout.h"
  #import "DmGameMenu.h"
-@@ -565,6 +566,7 @@ - (void)refresh {   // pressed state → fill, sticks → knob position
+@@ -565,6 +566,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
  static pad_slots g_slots;
  static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
  static int g_merge, g_press_to_join;

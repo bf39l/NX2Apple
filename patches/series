@@ -53,11 +53,10 @@
 0063-nvn-decode-cpu-bc-buffer-to-texture-copies-and-r.patch
 0064-older-devices-decode-bc-textures-across-the-cpu.patch
 0067-ios-a-game-framework-s-copies-are-clones-of-the.patch
-0068-game-resplit-nintendo-switch-sports-resort-shade.patch
 0069-build-seed-fix-zero-inode-loop-detection-and-sta.patch
-0070-packing-nsp-derive-shader-map-when-only-main-dup.patch
 0071-packing-shaders-refresh-stardew-valley-animal-cr.patch
 0072-packing-unity-support-stripped-unity-2017-2-shad.patch
 0073-packing-xcom2-collection-multiple-programs.patch
 0074-host-web-report-script-window-closure.patch
 0075-host-account-hand-open-users-to-the-next-program.patch
+0076-rewriter-nro-separate-writable-data-from-code.patch

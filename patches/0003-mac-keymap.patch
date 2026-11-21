@@ -22,7 +22,7 @@ Issue: LNPANDY/NX2Apple#386
  create mode 100644 dm/host/tests/t_launcher_contract.c
 
 diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
-index d80024f..904ba47 100644
+index 3c4d7df..33c8763 100644
 --- a/dm/host/front_mac.m
 +++ b/dm/host/front_mac.m
 @@ -5,7 +5,8 @@
@@ -43,7 +43,7 @@ index d80024f..904ba47 100644
  #include "haptics_apple.h"
  #include "motion_apple.h"
  #include "motion_pro_mac.h"
-@@ -40,8 +42,7 @@
+@@ -40,8 +42,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
  
  static CAMetalLayer *g_layer;
  static uint64_t g_btn;
@@ -147,7 +147,7 @@ index d80024f..904ba47 100644
      const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
      e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
      e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
-@@ -1767,7 +1769,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
+@@ -1775,7 +1777,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
      dispatch_sync(dispatch_get_main_queue(), ^{
          // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
          // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
@@ -380,12 +380,12 @@ index 5cfed8f..5659616 100644
  dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
  dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
 diff --git a/docs/development.md b/docs/development.md
-index 9600f1f..9b87066 100644
+index 8088b00..2489478 100644
 --- a/docs/development.md
 +++ b/docs/development.md
 @@ -14,6 +14,8 @@ The README covers packing and playing. This page is for working on nxnative itse
  | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app. A settings screen comes before the game (`Launcher.swift`, drawn from `dm/launcher.json`, which `dm/games/settings.py` writes from `dm/games/settings.tsv`); the host's loading starts at app launch meanwhile, and the frame rate and render scale go into the frame step state when the game starts (`loader.c` `dm_fps_state_apply`) |
- | Known gaps | Conditional render is always drawn; [indirect-count multi-draws](reference/rendering.md#indirect-count-multi-draws) can wait for a GPU-written count when the records need conversion, cannot be GPU-masked, or exceed the mask table capacity; geometry shaders do not translate. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
+ | Known gaps | Conditional render is always drawn; [indirect-count multi-draws](reference/rendering.md#indirect-count-multi-draws) can wait for a GPU-written count when the records need conversion, cannot be GPU-masked, or exceed the mask table capacity; multi-viewport broadcast is not implemented. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
  
 +On the Mac, `DM_KEYMAP=<name>=<key code>,…` puts a button, a stick direction (the right stick too, on no key by default) or `Shake` on another key, and `DM_PAD_MAP=<name>=<name>,…` changes what a controller's buttons send (`A=B,B=A` swaps them; `input_map.h`).
 +

@@ -1,0 +1,388 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Sun, 22 Nov 2026 12:00:00 +1300
+Subject: [PATCH] rewriter/nro: separate writable data from executable Mac
+ pages
+
+Upstream-Status: pending
+Reason: small NROs must not put writable globals on an executable 16 KB Mac page
+Issue: https://github.com/bf39l/nxnative/tree/fix/nro-shared-host-page
+
+Move overlapping NRO data and bss onto their own Mac page and rebase the
+module metadata, relocations and PC-relative references. Keep original
+registration hashes and already separated layouts unchanged. Include the
+layout helper in rewrite cache keys so existing game builds refresh it.
+
+Native page-protection regression and NRO tests pass. FF8 1.0.0's capture
+host loaded the two affected modules and captured 34 shaders in 45 seconds.
+Gameplay remains unverified.
+---
+ dm/tools/nro_layout.py            | 108 +++++++++++++++++++++++++++
+ dm/tools/patch_nso.py             |   6 +-
+ dm/tools/tests/test_nro_header.py |   3 +-
+ dm/tools/tests/test_nro_layout.py | 120 ++++++++++++++++++++++++++++++
+ dm/tools/tests/test_nro_pack.py   |   7 +-
+ docs/reference/rewriter.md        |   8 ++
+ scripts/build_ipa_from_nsp.py     |   2 +-
+ scripts/regress.py                |   2 +-
+ 8 files changed, 250 insertions(+), 6 deletions(-)
+ create mode 100644 dm/tools/nro_layout.py
+ create mode 100644 dm/tools/tests/test_nro_layout.py
+
+diff --git a/dm/tools/nro_layout.py b/dm/tools/nro_layout.py
+new file mode 100644
+index 0000000..21b1258
+--- /dev/null
++++ b/dm/tools/nro_layout.py
+@@ -0,0 +1,108 @@
++"""Separate an NRO's writable segment from text on Apple's 16 KB pages.
++Code and ro keep their offsets. Data and bss move together; ELF pointers and
++PC-relative instructions follow them. Ordinary, already separated modules are unchanged.
++"""
++import struct
++
++import capstone
++import nso
++import nso_code
++
++
++def separate_data(mod):
++    img, text = mod.image, mod.text_end
++    data, size = mod.segments[2]
++    start = (text + 0x3fff) & ~0x3fff
++    if img[0x10:0x14] != b'NRO0' or data >= start: return mod
++    delta, end = start - data, len(img) + mod.bss
++    old = bytes(img)
++
++    def moved(v): return v + delta if data <= v <= end else v
++    def at(v): return v + delta if v >= data else v
++    out = bytearray(old[:data] + bytes(delta) + old[data:])
++
++    def put(fmt, p, v): struct.pack_into(fmt, out, at(p), v)
++    def u32(p): return struct.unpack_from('<I', old, p)[0]
++    def u64(p): return struct.unpack_from('<Q', old, p)[0]
++    m0 = u32(4)
++    if old[m0:m0 + 4] != b'MOD0': raise nso.Error('NRO shared page: no MOD0')
++    # MOD0 fields are relative to MOD0 itself, including the bss end sentinel.
++    for p in range(m0 + 4, m0 + 28, 4):
++        v = struct.unpack_from('<i', old, p)[0]
++        if v: put('<i', p, moved(m0 + v) - at(m0))
++    put('<I', 0x18, len(out)); put('<I', 0x30, start)
++    for p in (0x60, 0x68, 0x70, 0x78):
++        if u32(p): put('<I', p, moved(u32(p)))
++
++    dyn = m0 + struct.unpack_from('<i', old, m0 + 4)[0]
++    tags = {}
++    # Pointer-valued DT tags only: lengths, flags and symbol indices are not addresses.
++    pointers = {3, 4, 5, 6, 7, 12, 13, 17, 21, 23, 25, 26, 32, 36,
++                0x6ffffef5, 0x6ffffff0, 0x6ffffffc, 0x6ffffffe}
++    for p in range(dyn, len(old) - 15, 16):
++        tag, val = struct.unpack_from('<QQ', old, p)
++        if not tag: break
++        tags[tag] = val
++        if tag in pointers and val: put('<Q', p + 8, moved(val))
++    else: raise nso.Error('NRO shared page: unterminated dynamic table')
++    if 17 in tags: raise nso.Error('NRO shared page: REL relocations are unsupported')
++    for table, count in ((tags.get(7, 0), tags.get(8, 0)), (tags.get(23, 0), tags.get(2, 0))):
++        for p in range(table, table + count, 24):
++            target, info, addend = struct.unpack_from('<QQq', old, p)
++            put('<Q', p, moved(target))
++            if info & 0xffffffff == 1027: put('<q', p + 16, moved(addend))   # R_AARCH64_RELATIVE
++    # RELR also stores each relative addend in the target slot itself.
++    cursor = None
++    for p in range(tags.get(36, 0), tags.get(36, 0) + tags.get(35, 0), 8):
++        v = u64(p)
++        if not v & 1:
++            put('<Q', p, moved(v)); slots = [v]; cursor = v + 8
++        else:
++            if cursor is None: raise nso.Error('NRO shared page: RELR bitmap without an address')
++            slots = [cursor + 8 * i for i in range(63) if v >> (i + 1) & 1]
++            cursor += 63 * 8
++        for slot in slots: put('<Q', slot, moved(u64(slot)))
++    if 6 in tags:
++        n = u32(tags[4] + 4) if 4 in tags else (tags[5] - tags[6]) // 24
++        for p in range(tags[6], tags[6] + n * 24, 24):
++            section = struct.unpack_from('<H', old, p + 6)[0]
++            if section and section < 0xff00: put('<Q', p + 8, moved(u64(p + 8)))
++
++    # Unwind records here must remain in ro. Reject exception metadata until its
++    # LSDA type-table references can also be rebased; never emit a partial rewrite.
++    ehs, ehe = nso_code.eh_frame_hdr(old)
++    for _, f in nso_code.fde_table(old):
++        c = f + 4 - u32(f + 4)
++        p = c + 9
++        aug = old[p:old.index(b'\0', p)]
++        if b'P' in aug or f >= data or c >= data:
++            raise nso.Error('NRO shared page: exception or writable unwind metadata needs rebasing')
++    if ehs >= data and ehe > ehs:
++        raise nso.Error('NRO shared page: writable unwind header needs rebasing')
++
++    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
++    blocks = nso_code.data_blocks(old, text, md)
++    for p in range(0, text, 4):
++        if any(a <= p < b for a, b in blocks): continue
++        w = u32(p)
++        # ADRP and ADR encode a signed 21-bit immediate split around the opcode.
++        if w & 0x1f000000 == 0x10000000:
++            imm = ((w >> 5 & 0x7ffff) << 2) | (w >> 29 & 3)
++            if imm & 0x100000: imm -= 0x200000
++            page = bool(w & 0x80000000)
++            target = (p & ~0xfff) + (imm << 12) if page else p + imm
++            dest = moved(target)
++            if dest == target: continue
++            imm = (dest - (p & ~0xfff)) >> 12 if page else dest - p
++            if not -(1 << 20) <= imm < 1 << 20: raise nso.Error('NRO shared page: ADR target out of reach')
++            put('<I', p, (w & ~0x60ffffe0) | ((imm & 3) << 29) | ((imm >> 2 & 0x7ffff) << 5))
++        elif w & 0x3b000000 == 0x18000000:   # LDR literal (integer or SIMD), PRFM
++            imm = w >> 5 & 0x7ffff
++            if imm & 0x40000: imm -= 0x80000
++            target = p + imm * 4
++            dest = moved(target)
++            if dest == target: continue
++            imm = (dest - p) // 4
++            if not -(1 << 18) <= imm < 1 << 18: raise nso.Error('NRO shared page: literal target out of reach')
++            put('<I', p, (w & ~0xffffe0) | ((imm & 0x7ffff) << 5))
++    return nso.Module(out, (*mod.segments[:2], (start, size)), mod.bss, mod.build_id)
+diff --git a/dm/tools/patch_nso.py b/dm/tools/patch_nso.py
+index 54a8009..02a53d1 100644
+--- a/dm/tools/patch_nso.py
++++ b/dm/tools/patch_nso.py
+@@ -23,7 +23,7 @@ if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_A
+     sys.exit(f'[RED] Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {shlex.join([sys.executable, "-m", "pip", "install", "capstone>=5,<6"])}')
+ from capstone import *
+ from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
+-import nso, nso_asm, nso_syms
++import nso, nso_asm, nso_syms, nro_layout
+ from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
+ 
+ # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
+@@ -36,6 +36,9 @@ src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
+ # An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
+ # against its header before anything is allocated (a damaged module stops here with a [RED] line)
+ MOD = nso.cli_read(src)
++ORIG_TEXT = bytes(MOD.image[:MOD.text_end])   # changed.tsv includes the NRO layout rewrite too
++try: MOD = nro_layout.separate_data(MOD)
++except nso.Error as e: sys.exit(f'[RED] {e}')
+ bss = MOD.bss
+ # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
+ # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
+@@ -63,7 +66,6 @@ if TWO:
+ elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
+ SPLIT = (0x8000000 - FRONT - 0x100000 if GAP else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
+ IMG = MOD.image
+-ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
+ if not FAR: IMG.extend(bytes(bss))
+ TEXT_END = MOD.text_end
+ RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
+diff --git a/dm/tools/tests/test_nro_header.py b/dm/tools/tests/test_nro_header.py
+index 958ad25..c8b7630 100644
+--- a/dm/tools/tests/test_nro_header.py
++++ b/dm/tools/tests/test_nro_header.py
+@@ -26,12 +26,13 @@ class NroHeader(unittest.TestCase):
+         # A real function starts immediately after the NRO header. Both it and the build ID name x18.
+         raw = image({first_fde: [0xaa0003f2, RET]})
+         struct.pack_into('<II', raw, 0x80, 0xaa0003f2, RET)   # mov x18, x0; ret, with or without an FDE
++        raw.extend(bytes(0x1000))   # data starts on its own Mac page; header bytes need no layout rewrite
+         raw[0x1100:0x111c] = raw[0x20:0x3c]
+         struct.pack_into('<I', raw, 4, 0x1100)
+         struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
+         raw[0x10:0x14] = b'NRO0'
+         struct.pack_into('<I', raw, 0x18, len(raw))
+-        struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000)
++        struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x3000, 0x4000, 0x1000)
+         struct.pack_into('<I', raw, 0x38, 0)
+         struct.pack_into('<I', raw, 0x44, header_word)
+         with tempfile.TemporaryDirectory() as tmp:
+diff --git a/dm/tools/tests/test_nro_layout.py b/dm/tools/tests/test_nro_layout.py
+new file mode 100644
+index 0000000..2d6f566
+--- /dev/null
++++ b/dm/tools/tests/test_nro_layout.py
+@@ -0,0 +1,120 @@
++"""A 4 KB NRO must execute code and write its globals on a 16 KB Mac page."""
++import ctypes
++import mmap
++import os
++from pathlib import Path
++import platform
++import struct
++import subprocess
++import sys
++import tempfile
++import unittest
++
++TOOLS = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(TOOLS))
++import nro_layout
++import nso
++from nso_asm import ADRP
++
++
++def module(data=0x2000):
++    img = bytearray(data + 0x1000)
++    img[0x10:0x14] = b'NRO0'
++    struct.pack_into('<I', img, 4, 0x1000)
++    struct.pack_into('<I', img, 0x18, len(img))
++    struct.pack_into('<6I', img, 0x20, 0, 0x1000, 0x1000, data - 0x1000, data, 0x1000)
++    struct.pack_into('<I', img, 0x38, 0x1000)
++    img[0x1000:0x1004] = b'MOD0'
++    struct.pack_into('<6i', img, 0x1004, 0x40, data, data + 0x1000, 0, 0, 0)
++    # A relocated pointer to a counter, followed by native code that increments it.
++    tags = ((7, 0x1200), (8, 24), (9, 24), (6, 0x1300), (5, 0x1400), (4, 0x1500), (3, data))
++    for i, tag in enumerate(tags): struct.pack_into('<QQ', img, 0x1040 + 16 * i, *tag)
++    struct.pack_into('<QQq', img, 0x1200, data, 1027, data + 0x100)
++    struct.pack_into('<IBBHQQ', img, 0x1318, 0, 0x11, 0, 1, data + 0x100, 4)
++    struct.pack_into('<II', img, 0x1500, 1, 2)
++    struct.pack_into('<I', img, data + 0x100, 41)
++    code = (ADRP(1, 0x80, data), 0xf9400022, 0xb9400040, 0x11000400, 0xb9000040, 0xd65f03c0)
++    for i, w in enumerate(code): struct.pack_into('<I', img, 0x80 + 4 * i, w)
++    return nso.load(img)
++
++
++class NroLayout(unittest.TestCase):
++    def test_addresses_and_original_identity(self):
++        original = module(); before = bytes(original.image)
++        patched = nro_layout.separate_data(original); b = patched.image
++        self.assertEqual(bytes(original.image), before)
++        self.assertEqual(patched.segments, ((0, 0x1000), (0x1000, 0x1000), (0x4000, 0x1000)))
++        self.assertEqual(struct.unpack_from('<QQq', b, 0x1200), (0x4000, 1027, 0x4100))
++        self.assertEqual(struct.unpack_from('<Q', b, 0x1320)[0], 0x4100)
++        self.assertEqual(b[0x4000:], before[0x2000:])
++        self.assertEqual((patched.bss, patched.build_id), (original.bss, original.build_id))
++        self.assertEqual(struct.unpack_from('<I', b, 0x80)[0], ADRP(1, 0x80, 0x4000))
++
++    def test_separated_module_unchanged(self):
++        m = module(0x4000)
++        self.assertIs(nro_layout.separate_data(m), m)
++
++    def test_non_nro_unchanged(self):
++        m = module(); m.image[0x10:0x14] = bytes(4)
++        self.assertIs(nro_layout.separate_data(m), m)
++
++    def test_bss_symbols_absolute_symbols_and_header_offsets(self):
++        m = module(); b = m.image
++        struct.pack_into('<Q', b, 0x1320, 0x3ff0)   # a bss symbol
++        struct.pack_into('<I', b, 0x60, 0x2100)     # dso handle
++        r = nro_layout.separate_data(m).image
++        self.assertEqual(struct.unpack_from('<Q', r, 0x1320)[0], 0x5ff0)
++        self.assertEqual(struct.unpack_from('<I', r, 0x60)[0], 0x4100)
++        struct.pack_into('<H', b, 0x131e, 0xfff1)   # SHN_ABS values are constants
++        self.assertEqual(struct.unpack_from('<Q', nro_layout.separate_data(m).image, 0x1320)[0], 0x3ff0)
++
++    def test_adr_and_literal_reach_new_data(self):
++        m = module(); b = m.image
++        struct.pack_into('<I', b, 0x80, 0x10000000 | ((0x2100 - 0x80) >> 2 << 5))
++        struct.pack_into('<I', b, 0x84, 0x58000000 | ((0x2100 - 0x84) // 4 << 5))
++        r = nro_layout.separate_data(m).image
++        self.assertEqual(struct.unpack_from('<I', r, 0x80)[0], 0x10000000 | ((0x4100 - 0x80) >> 2 << 5))
++        self.assertEqual(struct.unpack_from('<I', r, 0x84)[0], 0x58000000 | ((0x4100 - 0x84) // 4 << 5))
++
++    def test_relr_explicit_and_bitmap_addends(self):
++        m = module(); b = m.image
++        for i, tag in enumerate(((36, 0x1600), (35, 16), (37, 8))):
++            struct.pack_into('<QQ', b, 0x10b0 + i * 16, *tag)
++        struct.pack_into('<QQ', b, 0x1600, 0x2020, 3)
++        struct.pack_into('<QQ', b, 0x2020, 0x2100, 0x80)
++        r = nro_layout.separate_data(m).image
++        self.assertEqual(struct.unpack_from('<QQ', r, 0x1600), (0x4020, 3))
++        self.assertEqual(struct.unpack_from('<QQ', r, 0x4020), (0x4100, 0x80))
++
++    def test_unsupported_relocation_does_not_mutate_input(self):
++        m = module(); struct.pack_into('<QQ', m.image, 0x10b0, 17, 0x1600)
++        before = bytes(m.image)
++        with self.assertRaisesRegex(nso.Error, 'REL relocations'):
++            nro_layout.separate_data(m)
++        self.assertEqual(bytes(m.image), before)
++
++    @unittest.skipUnless(sys.platform == 'darwin' and platform.machine() == 'arm64', 'native Apple page protections')
++    def test_native_relocation_and_global_write(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / 'module.bin'
++            m = nro_layout.separate_data(module()); path.write_bytes(m.image + bytes(m.bss))
++            run = subprocess.run([sys.executable, __file__, '--execute', str(path)], capture_output=True, text=True)
++            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
++
++
++if __name__ == '__main__':
++    if len(sys.argv) > 1 and sys.argv[1] == '--execute':
++        raw = Path(sys.argv[2]).read_bytes()
++        mem = mmap.mmap(-1, len(raw), prot=mmap.PROT_READ | mmap.PROT_WRITE)
++        mem[:] = raw
++        base = ctypes.addressof(ctypes.c_char.from_buffer(mem))
++        # Apply the actual ELF RELATIVE record, then seal text as the Mac loader does.
++        target, info, addend = struct.unpack_from('<QQq', raw, 0x1200)
++        ctypes.c_uint64.from_address(base + target).value = base + addend
++        libc = ctypes.CDLL(None)
++        libc.sys_icache_invalidate(ctypes.c_void_p(base), ctypes.c_size_t(0x1000))
++        assert libc.mprotect(ctypes.c_void_p(base), ctypes.c_size_t(0x4000), 5) == 0
++        assert ctypes.CFUNCTYPE(ctypes.c_int)(base + 0x80)() == 42
++        assert ctypes.c_uint32.from_address(base + addend).value == 42
++        os._exit(0)
++    unittest.main()
+diff --git a/dm/tools/tests/test_nro_pack.py b/dm/tools/tests/test_nro_pack.py
+index bc908ab..2014158 100644
+--- a/dm/tools/tests/test_nro_pack.py
++++ b/dm/tools/tests/test_nro_pack.py
+@@ -19,7 +19,7 @@ class NroPack(unittest.TestCase):
+         self.repo = self.tmp / 'repo'; self.exe = self.tmp / 'game/ExeFS'; self.rom = self.exe.parent / 'RomFS'
+         self.exe.mkdir(parents=True); self.rom.mkdir(); (self.exe / 'main').write_bytes(b'NSO0' + bytes(0x50))
+         (self.rom / 'game.nrr').write_bytes(b'registered')
+-        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
++        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nro_layout.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
+             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
+         self.out = self.tmp / 'patched_test'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
+         self.g = types.SimpleNamespace(words=lambda k: ['main'], modules_in=lambda folder: ['main'])
+@@ -56,6 +56,11 @@ class NroPack(unittest.TestCase):
+         (self.repo / 'dm/tools/nso_syms.py').write_text('v2'); self.build()
+         self.assertEqual((self.collections, self.rewrites), (3, 2))   # the rewriter also reads symbols directly
+ 
++    def test_layout_changes_invalidate_rewrite(self):
++        self.build()
++        (self.repo / 'dm/tools/nro_layout.py').write_text('v2'); self.build()
++        self.assertEqual((self.collections, self.rewrites), (1, 2))
++
+     def test_removed_registration_drops_stale_manifest(self):
+         self.build(); (self.rom / 'game.nrr').unlink(); self.build()
+         self.assertFalse((self.out / 'nro.tsv').exists())
+diff --git a/docs/reference/rewriter.md b/docs/reference/rewriter.md
+index 3916d10..823be03 100644
+--- a/docs/reference/rewriter.md
++++ b/docs/reference/rewriter.md
+@@ -568,3 +568,11 @@ To enroll a cut for any game's own module:
+ ## Checking a rewriter change
+ 
+ Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.
++
++### NRO data sharing an executable Mac page
++
++- **Symptom:** a small run-time NRO crashes in `relocate`, writing a `R_AARCH64_RELATIVE` slot inside its first 16 KB; making relocation temporarily writable only postpones the fault until its initializer writes a global.
++- **Cause:** Horizon permits 4 KB segments. An NRO's text and writable data can occupy the same 16 KB Apple page, which the loader seals RX after mapping. Apple does not permit ordinary anonymous pages to be writable and executable together.
++- **Fix:** `nro_layout.py`, before the ordinary rewrite, moves data and bss to the next 16 KB boundary when they overlap the text's executable pages. Code and ro retain their offsets. MOD0, NRO header offsets, dynamic pointers, defined symbols, RELA/RELR and PC-relative address instructions follow the moved data. The original NRO hash and registration size remain the collection manifest's identity. Already separated NROs and all NSOs are unchanged. Exception metadata or writable unwind tables in an affected module are explicitly refused until their references can be rebased too; this case remains open.
++- **Found on:** FINAL FANTASY VIII Remastered, `01008B900DC0A000`, base 1.0.0, its `Math.nro` and `Platform.nro`. This is a provisional bring-up, without a supported game profile or gameplay claim.
++- **Check:** `test_nro_layout.py` executes a synthetic NRO under native Mac RX/RW page protections and updates a relocated global; it also checks address instructions, symbols, bss, headers and unchanged layouts. `test_nro_pack.py` checks cache invalidation when the layout helper changes. On 2026-11-22, the existing FF8 capture host loaded both rewritten modules, ran for 45 seconds and captured 34 run-time shaders without a crash; gameplay remains untested. The standard `regress.py check --games` smoke comparison is not available for this provisional game (no registered profile or smoke route); the direct capture boot and focused NRO tests cover this narrow change instead.
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index c241157..d91c1b1 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -1934,7 +1934,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
+     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
+     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
+     except OSError: own = []
+-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'jump_solver.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_syms.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
++    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'jump_solver.py', 'nso.py', 'nso_code.py', 'nro_layout.py', 'nso_asm.py', 'nso_syms.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
+     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
+         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
+diff --git a/scripts/regress.py b/scripts/regress.py
+index 7ac2537..5458611 100644
+--- a/scripts/regress.py
++++ b/scripts/regress.py
+@@ -97,7 +97,7 @@ rfs = shader_lib.romfs
+ ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
+ GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
+ HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # as build_ipa_from_nsp.py: the host's sources and headers
+-REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/jump_solver.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/monolith_fps.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
++REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/jump_solver.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nro_layout.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/monolith_fps.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
+ HEAVY_EXE = {'clang', 'make', 'xcodebuild', 'ld', 'ld64', 'swift-frontend', 'dotnet', 'metal', 'metal-tt', 'air-tt', 'applegpu-nt', 'dmsh_xlate', 'spirv-cross'}   # jobs that skew a measurement
+ HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso|vk_shaders)\.py'   # (the shared measuring rule)
+ # Tolerances, from runs of one revision against itself (docs/development.md, The regression harness)

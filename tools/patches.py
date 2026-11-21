@@ -28,7 +28,8 @@ FORK_ENV_SWITCHES = 'patches/fork_env_switches.tsv'
 # patches away from these paths.
 GENERATED = (('docs/agents/game-patches.md', 'dm/tools/docs_patches.py'),
              ('docs/agents/symptoms.md', 'dm/tools/docs_symptoms.py'),
-             ('docs/env_switches.tsv', 'dm/tools/env_switches.py'))
+             ('docs/env_switches.tsv', 'dm/tools/env_switches.py'),
+             ('dm/gfx/nvn/dmsh_chain.h', 'dm/gfx/tools/dmsh_chain.py'))
 # What git exports to a hook (GIT_DIR in a worktree) and what points git at a repository. Every git command here names its repository
 # with cwd, so none of these may reach it: they would send the command to the repository that runs the hook.
 REPO_ENV = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',

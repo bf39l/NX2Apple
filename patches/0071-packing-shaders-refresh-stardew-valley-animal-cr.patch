@@ -26,7 +26,6 @@ Refs #2924
 Upstream-Status: forwarded seedds/nxnative#3096
 Reason: Refresh Stardew Valley, Animal Crossing and Captain Toad shader maps for 8d62601f
 Issue: none
-
 ---
  dm/games/01006F8002326000/README.md      |  1 +
  dm/games/01006F8002326000/shader_map.tsv | 74 ++++++++++++------------
@@ -37,7 +36,7 @@ Issue: none
  6 files changed, 92 insertions(+), 89 deletions(-)
 
 diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
-index a8b409e..01734a2 100644
+index bebe9b6..bd0362d 100644
 --- a/dm/games/01006F8002326000/README.md
 +++ b/dm/games/01006F8002326000/README.md
 @@ -45,6 +45,7 @@ Render conditions, which the host evaluates for every game ([Conditional renderi

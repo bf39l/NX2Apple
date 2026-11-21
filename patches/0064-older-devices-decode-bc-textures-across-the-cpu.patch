@@ -26,18 +26,18 @@ Upstream-Status: fork-only (extends the fork-only CPU BC decode, declined seedds
 Reason: speeds up bc-cpu-decode, which upstream declined, and runs only with tex_bc_cpu on a GPU without BC support
 Issue: LNPANDY/NX2Apple#777
 ---
- dm/gfx/nvn/nvn_mtl.m       |  4 ++--
+ dm/gfx/nvn/nvn_mtl.m       |  9 +++++----
  dm/gfx/tests/t_bc_cpu.m    | 16 ++++++++--------
  dm/gfx/tex/nvn_bcdec.c     | 19 +++++++++++++++++++
  dm/gfx/tex/nvn_bcdec.h     |  3 +++
  dm/gfx/tex/tests/t_bcdec.c | 35 +++++++++++++++++++++++++++++++++++
- 5 files changed, 67 insertions(+), 10 deletions(-)
+ 5 files changed, 70 insertions(+), 12 deletions(-)
 
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 2171e17..3ed815e 100644
+index acfbad9..a7e2c7f 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -4217,7 +4217,7 @@ static int tex_cpu_wait(const tex_t *t) {
+@@ -4305,7 +4305,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                  if (nvn_deswizzle(&t->d, l, y, src, bc_tmp, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
                  size_t dst_pitch = (size_t)w * bc_bpp;
                  for (uint32_t zz = 0; zz < z; zz++)
@@ -46,7 +46,23 @@ index 2171e17..3ed815e 100644
                                    (uint8_t *)stg.contents + off + (size_t)zz * dst_pitch * h, dst_pitch);
                  up_blit_add(stg, off, dst_pitch, dst_pitch * h, MTLSizeMake(w, h, z), mt, y, l);
                  off += dst_pitch * h * z;
-@@ -17019,7 +17019,7 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
+@@ -17359,20 +17359,21 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
+     uint32_t bc_pf = 0; int bc_bpp = 0;
+     int bc_cpu = g_bc_cpu && nvn_bc_unpacked(c->tex->d.format, &bc_pf, &bc_bpp);
+     if (bc_cpu) {
+-        if (g_cb && (pend_hits(c->src, img * nz) || sbw_hits(c->src, c->src + img * nz) || g_sbw_over)) {
++        if (!(c->flags & DM_COPY_SNAPSHOT) && g_cb && (pend_hits(c->src, img * nz) || sbw_hits(c->src, c->src + img * nz) || g_sbw_over)) {
+             uint64_t fence = mtl_sub_commit();
+             mtl_wait(fence, UINT64_MAX);
+             mtl_sub_begin();
++            void *mb;
+             mtl_addr(c->src, img * nz, &mb, &mo);
+             sb = (__bridge id<MTLBuffer>)mb;
+             gsrc = sb.gpuAddress + mo;
+-        } else if (gw_live(c->src, c->src + img * nz)) {
++        } else if (!(c->flags & DM_COPY_SNAPSHOT) && gw_live(c->src, c->src + img * nz)) {
+             mtl_finish_gpu_at(WS_FINISH);
+         }
          size_t urow = (size_t)c->r.width * (size_t)bc_bpp, uimg = urow * (size_t)c->r.height;
          id<MTLBuffer> ab; size_t ao = arena_alloc(uimg * (size_t)nz, &ab);
          for (int z = 0; z < nz; z++)

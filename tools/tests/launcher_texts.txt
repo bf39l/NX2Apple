@@ -43,6 +43,7 @@ Left stick
 Lets the game hear your microphone. macOS asks for access when you launch with this enabled.
 Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
 Loads each program's shader libraries in the background, whether a draw uses them or not.
+MacBook (16:10)
 Match screen
 Medium
 Metal 4 pipelines
@@ -61,7 +62,6 @@ Polish
 Portuguese
 Press a button to join
 Render scale
-Renders about a quarter more pixels: a little slower and warmer.
 Rumble cutoff
 Rumble strength
 Russian
@@ -73,6 +73,7 @@ Small
 Spanish
 Standard
 Switch 2 controllers
+Taller shapes render more pixels and can increase GPU time and heat.
 Thai
 The first start waits a few minutes for it, once.
 The size of the on-screen controls. Controls move toward medium when a size does not fit the screen.

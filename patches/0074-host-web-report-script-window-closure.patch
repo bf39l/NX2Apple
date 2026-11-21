@@ -10,10 +10,16 @@ Issue: https://github.com/bf39l/nxnative/tree/game/xcom2-collection
 Keep nx.endApplet's reason 0 distinct from window.close's reason 4.
 Two JavaScript regression tests pass. The user confirmed that XCOM 2's
 terms page advances on the Mac after updating its host.
-
 ---
+ dm/games/0100D0B00FB74000/README.md |  5 ++--
+ dm/host/web_apple.m                 |  3 +++
+ dm/tools/tests/test_web_shim.py     | 40 +++++++++++++++++++++++++++++
+ docs/reference/services.md          |  8 ++++++
+ 4 files changed, 54 insertions(+), 2 deletions(-)
+ create mode 100644 dm/tools/tests/test_web_shim.py
+
 diff --git a/dm/games/0100D0B00FB74000/README.md b/dm/games/0100D0B00FB74000/README.md
-index 61f26206..78bf90ea 100644
+index 61f2620..78bf90e 100644
 --- a/dm/games/0100D0B00FB74000/README.md
 +++ b/dm/games/0100D0B00FB74000/README.md
 @@ -2,7 +2,7 @@
@@ -40,7 +46,7 @@ index 61f26206..78bf90ea 100644
 +
 +- **Resolved on the Mac.** A closed the terms applet but the launcher reopened it. The page calls `window.close()`, whose result must be 4. [Offline applet pages close their browser window](../../../docs/reference/services.md#offline-applet-pages-close-their-browser-window). The user confirmed acceptance after the host update.
 diff --git a/dm/host/web_apple.m b/dm/host/web_apple.m
-index fd97d907..8c9263ef 100644
+index fd97d90..8c9263e 100644
 --- a/dm/host/web_apple.m
 +++ b/dm/host/web_apple.m
 @@ -68,6 +68,9 @@ static NSString *const SHIM = @R"JS(
@@ -55,7 +61,7 @@ index fd97d907..8c9263ef 100644
    if (cfg.muted && window.AudioNode) {
 diff --git a/dm/tools/tests/test_web_shim.py b/dm/tools/tests/test_web_shim.py
 new file mode 100644
-index 00000000..e3f9e769
+index 0000000..e3f9e76
 --- /dev/null
 +++ b/dm/tools/tests/test_web_shim.py
 @@ -0,0 +1,40 @@
@@ -100,10 +106,10 @@ index 00000000..e3f9e769
 +if __name__ == '__main__':
 +    unittest.main()
 diff --git a/docs/reference/services.md b/docs/reference/services.md
-index b335e1a..e5fcd42 100644
+index e44f91e..e44d007 100644
 --- a/docs/reference/services.md
 +++ b/docs/reference/services.md
-@@ -1776,3 +1776,11 @@ Most service calls can be found before they crash, before the first boot or the
+@@ -1836,3 +1836,11 @@ Most service calls can be found before they crash, before the first boot or the
  - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
  - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
  - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).

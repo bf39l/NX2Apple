@@ -162,7 +162,7 @@ index ca8bf34..d69274e 100644
 +// action (re-send the game data as romfs.img from the launcher), or NULL. The launcher's Game data section shows it.
 +const char *dm_old_archive_message(void);
 diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
-index 0f9d8b6..2e58a9a 100644
+index 5e4fe3b..e777c42 100644
 --- a/dm/ios/Sources/Launcher.swift
 +++ b/dm/ios/Sources/Launcher.swift
 @@ -10,6 +10,65 @@ import os
@@ -231,7 +231,7 @@ index 0f9d8b6..2e58a9a 100644
  /// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
  /// Cloud saves too). The host brings the save in from there when the game starts and
  /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
-@@ -61,14 +120,14 @@ private struct CloudSavesSection: View {
+@@ -64,14 +123,14 @@ private struct CloudSavesSection: View {
      }
  }
  
@@ -248,19 +248,19 @@ index 0f9d8b6..2e58a9a 100644
          let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
          picker.allowsMultipleSelection = false
          picker.delegate = context.coordinator
-@@ -133,6 +192,7 @@ private struct LauncherView: View {
+@@ -136,6 +195,7 @@ private struct LauncherView: View {
                      } footer: {
                          Text("Brings back all settings this game was tested with.")
                      }
 +                    GameDataSection()
-                     CloudSavesSection()
+                     // The background save check reads the selected folder until it returns.
+                     CloudSavesSection(checking: checking)
                      Section {
-                         HStack {
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
-index 63f8a0b..1dbf516 100644
+index 4cdcb15..79cdb73 100644
 --- a/dm/ios/Sources/front_ios.m
 +++ b/dm/ios/Sources/front_ios.m
-@@ -26,6 +26,7 @@
+@@ -26,6 +26,7 @@ const char *front_ios_boot_message(void);   // main.m: why a build that keeps th
  const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported)
  bool front_ios_hud_enabled_from_saved_choice(void);   // main.m: the saved choice enabled Metal's HUD at launch
  bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
@@ -268,7 +268,7 @@ index 63f8a0b..1dbf516 100644
  
  static CAMetalLayer *g_layer;
  static void front_ios_notify_setup(void);
-@@ -95,6 +96,7 @@ @interface DmRootVC : UIViewController
+@@ -95,6 +96,7 @@ static void tv_attach(void);
  #if __has_include(<UIKit/UIHingeInteraction.h>)
  - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
  #endif
@@ -276,7 +276,7 @@ index 63f8a0b..1dbf516 100644
  - (void)startGame;
  - (void)showFPS:(BOOL)on;
  @end
-@@ -150,6 +152,14 @@ - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1)) {
+@@ -150,6 +152,14 @@ static void launcher_done(void) { [g_root startGame]; }
  // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
  - (void)startGame {
      if (self.game) return;
@@ -291,7 +291,7 @@ index 63f8a0b..1dbf516 100644
      dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
      front_hud_env();   // apply the Play selection before the device check and game view (GitHub issue #840)
      const char *dev = front_ios_device_check();
-@@ -228,7 +238,8 @@ - (void)viewDidAppear:(BOOL)a {
+@@ -228,7 +238,8 @@ static void launcher_done(void) { [g_root startGame]; }
      }
      if (self.launched || !front_ios_boot_ok()) return;
      self.launched = YES; g_root = self;
@@ -356,7 +356,7 @@ index 6185a7a..b1f1a89 100644
  // The images in Documents: romfs.img in any letter case, romfs.img itself first. The NSP script writes the image as RomFS.img (extract/<version>/RomFS.img) and the Mac's
  // file system ignores letter case, but iOS's does not: a copy made through Finder or the Files app keeps the source's name, which an exact lookup of romfs.img never finds
  static NSArray<NSString *> *romfs_document_images(NSString *doc) {
-@@ -54,14 +87,40 @@ static int romfs_identity_accepts(NSString *img) {
+@@ -54,14 +87,40 @@ static NSArray<NSString *> *romfs_document_images(NSString *doc) {
      }];
      return imgs;
  }
@@ -398,7 +398,7 @@ index 6185a7a..b1f1a89 100644
      for (NSString *img in romfs_document_images(doc)) {
          if (!romfs_image_complete(img) || !romfs_identity_accepts(img)) continue;
          // A folder copy from before images is now dead weight of up to many GB (often cut off partway). Deleting its 300,000 files here took longer than iOS allows an app to start
-@@ -77,13 +136,52 @@ static int romfs_identity_accepts(NSString *img) {
+@@ -77,13 +136,52 @@ static NSString *romfs_locate(NSString *prog) {   // prog: a game of several pro
      }
      NSString *bundledImage = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs.img"];
      NSString *documentFolder = [doc stringByAppendingPathComponent:@"romfs"];
@@ -508,7 +508,7 @@ index 6185a7a..b1f1a89 100644
      NSFileManager *fm = NSFileManager.defaultManager;
      NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0], *res = NSBundle.mainBundle.resourcePath;
      NSString *dmdir = [res stringByAppendingPathComponent:@"dm"], *msl = [res stringByAppendingPathComponent:@"msl"], *prog = nil;
-@@ -232,18 +349,9 @@ static int boot_env(void) {
+@@ -232,18 +349,9 @@ static NSString *program_env(void) {
          setenv("DM_APP_DM", dmdir.fileSystemRepresentation, 1);   // the launcher's settings (Launcher.swift)
          fprintf(stderr, "boot: program %d of %s (%zu bytes of launch parameter)\n", n, [[plist stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] stringByReplacingOccurrencesOfString:@"\n" withString:@" "].UTF8String, d.length > 4 ? (size_t)d.length - 4 : 0);
      }

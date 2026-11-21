@@ -12,7 +12,7 @@ Issue: LNPANDY/NX2Apple#180
  dm/games/0100F2C0115B6000/game.tsv       |    3 +
  dm/games/game.py                         |    3 +
  dm/games/settings.tsv                    |    1 +
- dm/gfx/nvn/nvn_mtl.m                     |   80 +-
+ dm/gfx/nvn/nvn_mtl.m                     |   82 +-
  dm/gfx/tests/Makefile                    |    4 +
  dm/gfx/tests/t_bc_cpu.m                  |   90 ++
  dm/gfx/tex/README.md                     |    2 +-
@@ -29,7 +29,7 @@ Issue: LNPANDY/NX2Apple#180
  dm/tools/tests/test_launcher_settings.py |    8 +
  docs/reference/rendering.md              |    9 +
  docs/settings.md                         |    9 +-
- 21 files changed, 2090 insertions(+), 23 deletions(-)
+ 21 files changed, 2091 insertions(+), 24 deletions(-)
  create mode 100644 dm/gfx/tests/t_bc_cpu.m
  create mode 100644 dm/gfx/tex/nvn_bcdec.c
  create mode 100644 dm/gfx/tex/nvn_bcdec.h
@@ -73,11 +73,11 @@ index 742aba2..7a9cbdd 100644
  # 60 fps (30 on the Switch): the host decides each frame's step in whole vsyncs and holds the frame that long (rewriter stubs at FPSLocker's sites, patches.py FRAME_STEP);
  # 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power, 0 = the game's own step. Until the host has decided a step
 diff --git a/dm/games/game.py b/dm/games/game.py
-index 6df6034..4db679f 100644
+index 388e604..12a012f 100644
 --- a/dm/games/game.py
 +++ b/dm/games/game.py
-@@ -202,6 +202,8 @@ def header_one(g):
-     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload must be on or off: {tfu}')
+@@ -206,6 +206,8 @@ def header_one(g):
+         sys.exit(f'{g.id}: tex_copy_staging takes a main build ID and an aligned return address offset: {stage_copy}')
      tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
      if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
 +    tbc = g.get('tex_bc_cpu', 'off')   # decode BC-compressed textures on the CPU when the GPU has no BC support (A15/A16 and older; nvn_mtl.m uses nvn_bcdec.c): on / off
@@ -85,8 +85,8 @@ index 6df6034..4db679f 100644
      tds = g.get('tex_dyn_slots', 'off')   # shaders whose texture handle the translator could not trace to one slot: slot indices in c2, the bound slots in the fallback arrays (nvn_mtl.m): on / off
      if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
      vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
-@@ -263,6 +265,7 @@ def header_one(g):
-          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
+@@ -269,6 +271,7 @@ def header_one(g):
+          f'#define DM_GAME_TEX_COPY_STAGING_PC {sc[2] if sc else 0}',
           f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
           f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
 +         f'#define DM_GAME_TEX_BC_CPU {int(tbc == "on")}',
@@ -94,7 +94,7 @@ index 6df6034..4db679f 100644
           f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
           f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
 diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
-index 65cf7b8..4c56b08 100644
+index 9e5dd89..243508c 100644
 --- a/dm/games/settings.tsv
 +++ b/dm/games/settings.tsv
 @@ -40,5 +40,6 @@ DM_PSO_MTL4	toggle	-	DM_GAME_PSO_MTL4|1	gfxapi:nvn	Performance	Metal 4 pipelines
@@ -105,7 +105,7 @@ index 65cf7b8..4c56b08 100644
  DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0	Performance	Hold frames when late
  DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index fe43490..191744e 100644
+index a3ab6c3..248cd23 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -27,6 +27,7 @@
@@ -116,7 +116,7 @@ index fe43490..191744e 100644
  #include "../tex/nvn_deswizzle.h"
  #include "../tex/nvn_deswizzle_gpu.h"
  #include "nvn_builtin.h"
-@@ -135,6 +136,8 @@ static id compile_done(id result, NSError *error, NSError **out) {
+@@ -136,6 +137,8 @@ static id<MTLLibrary> host_lib_from(id<MTL4Compiler> compiler, const char *name,
      plain_compile_begin(); NSError *e = nil; id lib = host_msl_lib(g_dev, compiler, name, &e); return compile_done(lib, e, out);
  }
  static id<MTLLibrary> host_lib(const char *name, NSError **e) { return host_lib_from(nil, name, e); }
@@ -125,7 +125,7 @@ index fe43490..191744e 100644
  static NSMutableArray *g_l3_gpu_leaks;
  static int g_nvn_deswz_gpu;
  static id<MTLCommandQueue> g_q;
-@@ -838,6 +841,11 @@ static void mtl_init_once(void) {
+@@ -889,6 +892,11 @@ static void mtl_init_once(void) {
      g_dev = MTLCreateSystemDefaultDevice();
      if (!g_dev) MDIE("no Metal device");
      if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
@@ -135,9 +135,9 @@ index fe43490..191744e 100644
 +    // DM_BC6H_RGB9E5=1: BC6H (HDR) textures decode into RGB9E5Float, 4 bytes per pixel instead of RGBA16Float's 8. Off unless asked: it costs a little precision and negative values.
 +    { const char *e = getenv("DM_BC6H_RGB9E5"); nvn_bc_set_bc6h_rgb9e5(g_bc_cpu && e && !strcmp(e, "1")); if (nvn_bc_bc6h_rgb9e5()) MLOG("BC6H textures decode to RGB9E5 (DM_BC6H_RGB9E5=1): half the memory of RGBA16F"); }
      g_q = [g_dev newCommandQueue];
+     g_present_readbacks = dispatch_group_create();
      // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
-     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
-@@ -869,8 +877,9 @@ static void mtl_init_once(void) {
+@@ -922,8 +930,9 @@ static void mtl_init_once(void) {
          return;
      }
      // BC textures are created and uploaded as BC, with no decompression path (dm/gfx/tex/README.md); without BC the first one aborts in Metal's descriptor validation mid-game
@@ -149,9 +149,9 @@ index fe43490..191744e 100644
      { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
      g_alloc_n = 3;
      for (int i = 0; i < 3; i++) {
-@@ -3209,9 +3218,22 @@ static int tex_atomic_alias(id<MTLTexture> base) {
-         || pf == MTLPixelFormatRG16Unorm || pf == MTLPixelFormatRG16Snorm || pf == MTLPixelFormatRG16Uint || pf == MTLPixelFormatRG16Sint || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float;
-     return bytes32 && (base.textureType == MTLTextureType2D || base.textureType == MTLTextureType2DArray) && base.sampleCount == 1 && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
+@@ -3279,10 +3288,23 @@ static int tex_2d_size_exceeds_limit(const tex_t *t) {
+     // Apple10 raised the 2D limit to 32768. Keep the existing bounds for other targets.
+     return size > 32768 || t->d.target != NVN_TEXTURE_TARGET_2D || ![g_dev supportsFamily:MTLGPUFamilyApple10];
  }
 +// A view of CPU-decoded BC storage must name the decoded Metal format too.
 +// Keep the NVN format's channel mapping, including RGB BC1's opaque alpha.
@@ -164,16 +164,18 @@ index fe43490..191744e 100644
  static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
      uint32_t pf = 0; uint8_t swz[4];
 -    if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
+-    // Catch dimensions that would cause Metal's descriptor validation to abort.
 +    // A BC format on a GPU without BC support: create the texture in the uncompressed format the
 +    // decoder produces, and let the upload path fill it through nvn_bc_decode (below). Without
 +    // this the Metal format is a BC one the device cannot allocate, and every such texture is nil.
 +    uint32_t bc_unpacked = 0; int bc_bpp = 0;
 +    if (g_bc_cpu && nvn_bc_unpacked(t->d.format, &bc_unpacked, &bc_bpp)) pf = bc_unpacked;
 +    if (!pf && (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf)) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
-     // Metal's limits: 16384 in 2D, 2048 in 3D, 2048 array layers; beyond them Metal aborts the process on an assertion, so they are caught here with a red line
-     if (t->d.width > 16384 || t->d.height > 16384 || t->d.depth > 2048) { RED_ONCE(71, "texture size exceeds Metal limits: %u×%u×%u levels %u format %#x target %d (first case ser=%llu)", t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->serial); return nil; }
++    // Metal's limits: 16384 in 2D, 2048 in 3D, 2048 array layers; beyond them Metal aborts the process on an assertion, so they are caught here with a red line
+     if (tex_2d_size_exceeds_limit(t) || t->d.depth > 2048) { RED_ONCE(71, "texture size exceeds Metal limits: %u×%u×%u levels %u format %#x target %d (first case ser=%llu)", t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->serial); return nil; }
      MTLTextureDescriptor *d = [MTLTextureDescriptor new];
-@@ -3910,8 +3932,10 @@ static int tex_cpu_wait(const tex_t *t) {
+     d.pixelFormat = (MTLPixelFormat)pf;
+@@ -3998,8 +4020,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
      if (!d) return nil;
      d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
      int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
@@ -185,7 +187,7 @@ index fe43490..191744e 100644
      if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
      id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
                          && (reuse.usage & d.usage) == d.usage
-@@ -3945,19 +3969,19 @@ static int tex_cpu_wait(const tex_t *t) {
+@@ -4033,19 +4057,19 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
      void *mb; uint64_t mo;
      // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
      id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
@@ -209,7 +211,7 @@ index fe43490..191744e 100644
      if (use_gpu) {
          // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
          up_begin();
-@@ -4027,16 +4051,43 @@ static int tex_cpu_wait(const tex_t *t) {
+@@ -4115,16 +4139,43 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
          if (!(part = malloc(t->L.size ? t->L.size : 1))) MDIE("sparse texture copy of %llu bytes failed", (unsigned long long)t->L.size);
          sp_store_wait(t); nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
      }
@@ -254,7 +256,7 @@ index fe43490..191744e 100644
              if (linear) {   // one 2D level (linear_fit): rows of the storage's stride, the same pitch GetStorageSize counts
                  size_t srow = tex_linear_row(t);
                  if (l || y || z != 1 || srow < pitch || srow * rows > t->L.size) { RED_ONCE(153, "linear texture upload: %ux%u format %#x target %d levels %u is not one 2D level of rows (stride %zu)", t->d.width, t->d.height, t->d.format, t->d.target, t->d.levels, srow); break; }
-@@ -4050,6 +4101,7 @@ static int tex_cpu_wait(const tex_t *t) {
+@@ -4138,6 +4189,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
              off += pitch * rows * z;
          }
      }
@@ -262,7 +264,7 @@ index fe43490..191744e 100644
      free(part); free(need);
      up_flush();
      return mt;
-@@ -6086,7 +6138,7 @@ static int bc_block_bytes(MTLPixelFormat f) {   // bytes per 4x4 block of a BC f
+@@ -6198,7 +6250,7 @@ static int mtl_fmt_depth(MTLPixelFormat f) { return f == MTLPixelFormatDepth16Un
  // The shadow's format: the view's, when the base is BC (or a depth format, above) and the view is an uncompressed colour format with one block's bytes per pixel
  static int bcrt_view(id<MTLTexture> base, const view_t *v, int has_v, MTLPixelFormat *pf_out) {
      uint32_t pf = 0; uint8_t swz[4]; int bw = 0, bh = 0, side = 0, bb = base ? shrt_block(base.pixelFormat, &side) : 0;
@@ -271,7 +273,7 @@ index fe43490..191744e 100644
      if (nvn_fmt_bpb(v->format, &bw, &bh) != bb || bw != 1 || bh != 1) return 0;
      *pf_out = (MTLPixelFormat)pf; return 1;
  }
-@@ -6140,7 +6192,7 @@ static MTLPixelFormat rt_view_fmt(id<MTLTexture> base, const view_t *v, int has_
+@@ -6252,7 +6304,7 @@ static MTLPixelFormat rt_view_fmt(id<MTLTexture> base, const view_t *v, int has_
      }
      if (!base || !has_v || !v->set_format) return base.pixelFormat;
      uint32_t pf = 0; uint8_t swz[4];
@@ -280,7 +282,7 @@ index fe43490..191744e 100644
      if (tex_need_pfv(base.pixelFormat, (MTLPixelFormat)pf) && !(base.usage & MTLTextureUsagePixelFormatView)) return base.pixelFormat;
      return (MTLPixelFormat)pf;
  }
-@@ -6234,7 +6286,7 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
+@@ -6346,7 +6398,7 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
              if (vw) { a.texture = vw; defer_obj_unref(vw); }
              else { RED_ONCE(67, "cannot create the render target view: format %#x (base texture Metal format %lu)", v->format, (unsigned long)base.pixelFormat); rtv_note_bad_pair(base.pixelFormat, pf); }
          } else { uint32_t want = 0; uint8_t swz[4];
@@ -289,7 +291,7 @@ index fe43490..191744e 100644
                  RED_ONCE(68, "render target view format %#x cannot be attached (base texture Metal format %lu was created without the format-view usage): drawing in the base format", v->format, (unsigned long)base.pixelFormat); }
      }
  }
-@@ -7679,7 +7731,7 @@ static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
+@@ -7833,7 +7885,7 @@ static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
  static int treg_swizzle(const treg_t *r, MTLPixelFormat base_pf, int in_place, uint8_t sw[4], uint32_t *view_pf) {
      uint8_t fsw[4]; int need_sw = 0; *view_pf = 0;
      sw[0] = MTLTextureSwizzleRed; sw[1] = MTLTextureSwizzleGreen; sw[2] = MTLTextureSwizzleBlue; sw[3] = MTLTextureSwizzleAlpha;
@@ -298,7 +300,7 @@ index fe43490..191744e 100644
      if (!in_place) for (int c = 0; c < 4; c++) if (fsw[c] >= MTLTextureSwizzleRed) fsw[c] = (uint8_t)(MTLTextureSwizzleRed + c);
      // Metal cannot cast a depth texture to its single-channel colour equivalent. Use the same depth storage,
      // but present (R, 0, 0, 1) to the NVN swizzle: a float shader reading Metal depth can see depth in G and B too.
-@@ -17497,7 +17549,7 @@ static void clear_tex(const p_clear_tex *c) {
+@@ -17859,7 +17911,7 @@ static void clear_tex(const p_clear_tex *c) {
          t = tex_upgrade(c->tex, t, MTLTextureUsageRenderTarget, t.pixelFormat);   // a clear of a texture made without render-target use (packaged): give it that use
      if (c->has_view && c->view.set_format) {   // View with changed format: the clear value is interpreted in the view format (all 5 of the game's calls are the ui version with an integer view), and the clear is done on a view of the same format
          uint32_t vpf = 0; uint8_t swz[4];
@@ -308,13 +310,13 @@ index fe43490..191744e 100644
          if (tex_need_pfv(t.pixelFormat, (MTLPixelFormat)vpf)) {
              id<MTLTexture> v = [t newTextureViewWithPixelFormat:(MTLPixelFormat)vpf];
 diff --git a/dm/gfx/tests/Makefile b/dm/gfx/tests/Makefile
-index 0a7c8fe..2518bf2 100644
+index 01d15e1..4632ff5 100644
 --- a/dm/gfx/tests/Makefile
 +++ b/dm/gfx/tests/Makefile
-@@ -942,3 +942,7 @@ check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
- t_sparse_copy: t_sparse_copy.m $(MTL_T_DEP)
- 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_copy.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
- check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1
+@@ -961,3 +961,7 @@ t_depth_bounds: t_depth_bounds.m $(MTL_T_DEP)
+ check_t_depth_bounds: t_depth_bounds
+ 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+ 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 +
 +t_bc_cpu: t_bc_cpu.m $(MTL_T_DEP)
 +	clang $(CFLAGS) -fobjc-arc -o $@ t_bc_cpu.m $(MTL_T_SRC) $(FW)
@@ -818,7 +820,7 @@ index 8d7154e..6ca5524 100644
  #include "front.h"
  #include "romfs_image.h"
  #include "DataBookmark.h"
-@@ -212,7 +213,7 @@ static void aoc_locate(void) {
+@@ -212,7 +213,7 @@ const char *front_ios_device_check(void) {
      static char msg[320]; static int done;
      if (done++) return msg[0] ? msg : NULL;
      id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init repeats this check for the other routes)
@@ -2412,7 +2414,7 @@ index 0000000..553c3ec
 +
 +*/
 diff --git a/dm/tools/docs_patches.py b/dm/tools/docs_patches.py
-index bb07b85..dd8f940 100644
+index 1d2b93b..12d0cb0 100644
 --- a/dm/tools/docs_patches.py
 +++ b/dm/tools/docs_patches.py
 @@ -140,6 +140,8 @@ SWITCH_BINDING = [
@@ -2425,7 +2427,7 @@ index bb07b85..dd8f940 100644
  
  
 diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
-index de17ca7..9a48a50 100644
+index 1b4eded..8eb85f1 100644
 --- a/dm/tools/tests/test_launcher_settings.py
 +++ b/dm/tools/tests/test_launcher_settings.py
 @@ -84,6 +84,14 @@ class LauncherSettingsTests(unittest.TestCase):
@@ -2444,10 +2446,10 @@ index de17ca7..9a48a50 100644
          s = build(BOTW, 'nvn')['DM_FPS_HOLD']
          self.assertEqual((s['on'], s['off'], s['default']), ('on', 'off', 'on'))
 diff --git a/docs/reference/rendering.md b/docs/reference/rendering.md
-index bfbc660..15498a0 100644
+index 291ecb5..1e4cd61 100644
 --- a/docs/reference/rendering.md
 +++ b/docs/reference/rendering.md
-@@ -2655,3 +2655,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
+@@ -2694,3 +2694,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
  - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
  - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
  - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
@@ -2461,7 +2463,7 @@ index bfbc660..15498a0 100644
 +- **Limits:** this does not implement raw compressed-block views, GPU BC block encoding, or decoded-to-compressed readback. It keeps the existing compatibility opt-in and does not change the supported-device check.
 +- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 diff --git a/docs/settings.md b/docs/settings.md
-index ea67972..a945fdf 100644
+index 12a5ce6..bd6f94c 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
 @@ -5,7 +5,7 @@ The screen before the game starts shows the settings the game supports. A settin

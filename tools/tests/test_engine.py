@@ -127,6 +127,17 @@ class Sync(Fixture):
         self.assertEqual(git(self.eng, 'rev-parse', '--abbrev-ref', 'HEAD'), 'nx2apple')
         self.assertEqual(git(self.eng, 'status', '--porcelain'), '')
 
+    def test_sync_generates_chain_header_from_the_patched_tree(self):
+        self.wu('dm/gfx/nvn/dmsh_chain.h', 'stale\n')
+        sha = self.up_commit('dm/gfx/tools/dmsh_chain.py',
+                             "import pathlib, sys\nassert sys.argv[1:] == ['--header']\n"
+                             "p = pathlib.Path('dm/gfx/nvn/dmsh_chain.h')\n"
+                             "p.write_text(pathlib.Path('dm/a.c').read_text())\n", 'chain generator')
+        (self.r / '.upstream-ref').write_text(sha + '\n')
+        self.tool('sync')
+        self.assertEqual((self.eng / 'dm/gfx/nvn/dmsh_chain.h').read_text(), (self.eng / 'dm/a.c').read_text())
+        self.assertEqual(git(self.eng, 'status', '--porcelain'), '')
+
     def test_sync_succeeds_when_global_autocrlf_is_true(self):
         # Windows sets core.autocrlf=true globally; checkout must not write CRLF and make `git am -3` fail on local changes
         env = dict(self.env, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.autocrlf', GIT_CONFIG_VALUE_0='true')
@@ -297,7 +308,7 @@ class LocalWork(Fixture):
 
     def test_export_refuses_the_shader_chain(self):
         self.tool('sync')
-        self.commit_in_engine('dm/gfx/nvn/dmsh_chain.h', 'x\n', 'Touch the chain')
+        self.commit_in_engine('dm/gfx/tools/dmsh_chain.py', 'x\n', 'Touch the chain')
         out = self.tool('export', expect=2)
         self.assertIn('shader chain', out)
         self.assertFalse((self.r / 'patches/0002-touch-the-chain.patch').exists())

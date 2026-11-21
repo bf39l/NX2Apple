@@ -8,6 +8,7 @@ import XCTest
 final class GermanLocalizationTests: IsolatedDefaultsTestCase {
     /// Keys whose German text is the English text on purpose: names, units and button letters.
     private let sameAsEnglish: Set<String> = [
+        "launch.opt.DM_SCREEN_ASPECT.1.6",   // MacBook is a product name
         "library.chip.both", "shell.choiceLauncher", "onboarding.xcode.section", "onboarding.step.xcode", "files.optional",
         "onboarding.platform.mac", "onboarding.platform.iphone", "onboarding.setup.metal",
         "onboarding.background.python", "onboarding.background.dotnet",

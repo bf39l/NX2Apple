@@ -38,7 +38,7 @@ index 77dacdf..985140a 100644
  //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
  //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
  #import <UIKit/UIKit.h>
-@@ -277,9 +277,11 @@ - (void)setTouchFeedback:(BOOL)on {
+@@ -277,9 +277,11 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
  // ---- Layout (points; computed inside the safe area) ----
  - (void)arrange:(DmLayout)layout {
      if (CGRectEqualToRect(_layout.controls, layout.controls) && CGRectEqualToRect(_layout.game, layout.game) && _layout.separated == layout.separated
@@ -62,7 +62,7 @@ index 77dacdf..985140a 100644
  - (void)padsChanged:(NSNotification *)note {
      GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
      if (gone) pad_unlisten(gone);   // even a controller still waiting for its first press can have a handler
-@@ -731,7 +737,7 @@ - (void)padsChanged:(NSNotification *)note {
+@@ -731,7 +737,7 @@ static BOOL pads_slotted(GCController *gone) {
          if (!usable || g_merge) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), usable ? "" : " (no supported gamepad profile: not used)");
      }
      BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
@@ -103,10 +103,10 @@ index bfc19b7..3301c55 100644
  // Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
  // area above the controls, where cropping a small picture would cost more than the bars.
 diff --git a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
-index aed4fc6..846b8ec 100644
+index a8efbe9..973301f 100644
 --- a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
 +++ b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
-@@ -104,6 +104,13 @@ void dm_motion_clear(int player) {
+@@ -104,6 +104,13 @@ int duo_harness_rumble(void) { return g_rumble; }
  void dm_haptics_apple_init(void) {}
  void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
  
@@ -124,7 +124,7 @@ diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/D
 index bb08ed6..beefab5 100644
 --- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
 +++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
-@@ -1311,6 +1311,36 @@ - (void)testPoseChangeReleasesHeldButtonAndGameTouch {
+@@ -1311,6 +1311,36 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
      [self endTouches:@[video, button] onPad:pad cancelled:NO];
  }
  
@@ -162,10 +162,10 @@ index bb08ed6..beefab5 100644
      if (@available(iOS 17.0, *)) {
          [self setHarnessControllers:nil notification:nil];
 diff --git a/docs/reference/rendering.md b/docs/reference/rendering.md
-index 183a5f2..bfbc660 100644
+index 214c7d4..291ecb5 100644
 --- a/docs/reference/rendering.md
 +++ b/docs/reference/rendering.md
-@@ -2644,7 +2644,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
+@@ -2683,7 +2683,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
  
  - **Symptom:** portrait gameplay overlaps the touch controls, touch coordinates land outside the game picture, or a TV's picture renders at 4K again after a layout pass.
  - **Cause:** the front end assumed a landscape screen with the controls over the whole view, so its picture and touch geometry did not follow a portrait screen (an iPad, an iPhone Duo's inner display) or a Duo's fold. On iPadOS the deprecated `UIRequiresFullScreen` kept the game out of resizable windows, and a native rotation A/B on the iPhone Duo iOS 27.1 simulator showed that it also blocked upside-down portrait.
@@ -175,7 +175,7 @@ index 183a5f2..bfbc660 100644
  - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md).
  
 diff --git a/docs/settings.md b/docs/settings.md
-index 6bc995c..0a3aeb4 100644
+index 0ea6cc8..8a011d1 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
 @@ -254,13 +254,13 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
