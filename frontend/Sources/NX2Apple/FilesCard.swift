@@ -53,8 +53,11 @@ struct FilesCard: View {
                         FileRowDivider()
                         let folderText = build.gameFolderRowText(slot.id)
                         fileRow(loc.t(slot.id == "dlc" ? "data.dlc" : slot.title),
-                                subtitle: folderText ?? (slot.paths.isEmpty ? loc.t("files.optional") : slot.summary(loc.t)),
-                                help: slot.paths.joined(separator: "\n"), chosen: !slot.paths.isEmpty || (folderText != nil && build.gameFolder != nil)) {
+                                subtitle: folderText ?? (!slot.problem.isEmpty ? slot.summary(loc.t) : slot.paths.isEmpty ? loc.t("files.optional") : ""),
+                                help: slot.paths.joined(separator: "\n"), chosen: !slot.paths.isEmpty || (folderText != nil && build.gameFolder != nil),
+                                problem: !slot.problem.isEmpty,
+                                selectedFiles: folderText == nil ? slot.paths : [],
+                                selectionNote: folderText == nil ? slot.note : "") {
                             if folderText == nil {
                                 HStack(spacing: DS.Space.xs) {
                                     if !slot.paths.isEmpty {
@@ -154,9 +157,9 @@ struct FilesCard: View {
     /// One row of the list (FileRow): a thumbnail-sized leading slot (the cover, a dot once chosen, empty otherwise), the title,
     /// one secondary line and the trailing control column. `chosen` nil leaves the slot out (the Save to row).
     private func fileRow<Trailing: View>(_ title: String, subtitle: String, help: String, chosen: Bool?, problem: Bool = false, thumbnail: NSImage? = nil,
-                                         message: DSRowMessage? = nil, info: (id: String, text: String)? = nil,
+                                         message: DSRowMessage? = nil, info: (id: String, text: String)? = nil, selectedFiles: [String] = [], selectionNote: String = "",
                                          @ViewBuilder trailing: () -> Trailing) -> some View {
-        FileRow(title: title, subtitle: subtitle, help: help, chosen: chosen, problem: problem, thumbnail: thumbnail, message: message, info: info,
+        FileRow(title: title, subtitle: subtitle, help: help, chosen: chosen, problem: problem, thumbnail: thumbnail, message: message, info: info, selectedFiles: selectedFiles, selectionNote: selectionNote,
                 trailing: trailing())
     }
     private func pickFolder() { Self.pickFolder(build) }
@@ -181,6 +184,8 @@ private struct FileRow<Trailing: View>: View {
     let thumbnail: NSImage?
     let message: DSRowMessage?
     let info: (id: String, text: String)?
+    let selectedFiles: [String]
+    let selectionNote: String
     let trailing: Trailing
     @Environment(\.dsRowReservesSlot) private var reservesSlot
 
@@ -208,11 +213,28 @@ private struct FileRow<Trailing: View>: View {
                         Text(title).font(DS.Font.body).foregroundStyle(DS.Color.textPrimary)
                         if let info { LauncherInfoHelp(id: info.id, label: title, text: info.text) }
                     }
-                    Text(subtitle).font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary).lineLimit(2).truncationMode(.middle).help(help)
+                    if !subtitle.isEmpty {
+                        Text(subtitle).font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary).lineLimit(problem ? nil : 2).truncationMode(.middle).fixedSize(horizontal: false, vertical: true).help(help)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // the control column: every row button is exactly its width (launcherRowControls), never wider
                 trailing.frame(minWidth: DS.Control.columnWidth, alignment: .trailing).launcherRowControls()
+            }
+            if !selectedFiles.isEmpty {
+                VStack(alignment: .leading, spacing: DS.Space.xs) {
+                    ForEach(selectedFiles, id: \.self) { path in
+                        Text(URL(fileURLWithPath: path).lastPathComponent)
+                            .font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled).help(path)
+                    }
+                    if !selectionNote.isEmpty {
+                        Text(selectionNote).font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.leading, slot ? DS.Control.thumbnail + DS.Space.s : 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             // the row's message under the title and subtitle, its symbol at their leading edge: the control stays centred on them
             if let message {

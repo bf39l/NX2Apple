@@ -133,6 +133,47 @@ import NXModel
         return labels
     }
 
+    func testFilesCardShowsRejectedUpdateAndDLCInsteadOfOptional() throws {
+        let enhanced = NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
+        let previous = NSApplication.shared.accessibilityAttributeValue(enhanced)
+        NSApplication.shared.accessibilitySetValue(true, forAttribute: enhanced)
+        defer { NSApplication.shared.accessibilitySetValue(previous ?? false, forAttribute: enhanced) }
+        let stores = LauncherStores(localizer: Localizer(.en), defaults: testDefaults)
+        let base = "Romance_010019D01D736000_v1.0.0.nsp"
+        stores.build.take(picked: [temporary.appendingPathComponent(base).path], kind: .base)
+        stores.build.take(picked: [temporary.appendingPathComponent("Romance_010019D01D736000_Update_v1.1.0.nsp").path], kind: .update)
+        stores.build.take(picked: [temporary.appendingPathComponent("Romance_010019D01D736000_DLC_001.nsp").path], kind: .dlc)
+        let updateProblem = stores.build.slot("update").problem
+        let dlcProblem = stores.build.slot("dlc").problem
+        XCTAssertFalse(updateProblem.isEmpty)
+        XCTAssertFalse(dlcProblem.isEmpty)
+        let view = FilesCard(build: stores.build, fetchMetadata: false, extrasOpen: .constant(true))
+            .environmentObject(stores.localizer).environmentObject(PadFocus())
+        let host = NSHostingView(rootView: view)
+        let window = OffscreenWindow(size: NSSize(width: 960, height: 1000))
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.orderOut(nil); window.contentView = nil; window.close() }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+        let visible = texts(in: host)
+        XCTAssertTrue(visible.contains(updateProblem), "Rejected update must be explained in its row: \(visible)")
+        XCTAssertTrue(visible.contains(dlcProblem), "Rejected DLC must be explained in its row")
+
+        let updateName = "Romance_010019D01D736800_Update_v1.1.0.nsp"
+        let dlcNames = ["Romance_010019D01D737001_DLC_001.nsp", "Romance_010019D01D737002_DLC_002.nsp"]
+        stores.build.take(picked: [temporary.appendingPathComponent(updateName).path], kind: .update)
+        stores.build.take(picked: dlcNames.map { temporary.appendingPathComponent($0).path }, kind: .dlc)
+        XCTAssertTrue(stores.build.slot("update").problem.isEmpty)
+        XCTAssertTrue(stores.build.slot("dlc").problem.isEmpty)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+        let selected = texts(in: host)
+        for name in [updateName] + dlcNames {
+            XCTAssertTrue(selected.contains(name), "Each accepted filename must be visible: \(name)")
+        }
+    }
+
     // MARK: - 1. Unbuilt Game Version Extraction & Hero Display
 
     func testNACPDisplayVersionValidationAndBoundsSafety() {
