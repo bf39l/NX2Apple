@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Sun, 22 Nov 2026 21:40:00 +1300
+Subject: [PATCH] packing/unreal: decode Zstd pak blocks directly
+
+Upstream-Status: pending
+Reason: Zstandard pak blocks must not be sent to a game's Oodle decoder
+Issue: local BRAVELY DEFAULT II bring-up (01006DC010326000)
+
+Use compression.zstd or backports.zstd with bounded output and exact frame
+and raw-size checks. Preserve real decompression failures. Add synthetic
+pak coverage, wrong sizes, truncated frames and trailing bytes.
+
+Checked 80 Unreal archive tests and split 33,335 shaders from BRAVELY
+DEFAULT II 1.0.0. One monster texture remains genuinely unreadable.
+---
+diff --git a/dm/gfx/tools/uepak.py b/dm/gfx/tools/uepak.py
+index 5aceeac8..3ee6b46b 100644
+--- a/dm/gfx/tools/uepak.py
++++ b/dm/gfx/tools/uepak.py
+@@ -382,13 +382,16 @@ class Pak:
+         if meth > len(self.methods) or meth and not self.methods[meth - 1]: raise ValueError(f'{self.path}: {path} names compression method {meth}, which the footer does not')
+         return dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=enc, block_size=bsz, blocks=blocks)
+     def read(self, path, decode=None):
+-        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
++        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib, LZ4 and Zstd blocks are decoded here (OCTOPATH TRAVELER II: Zlib, BRAVELY DEFAULT II: Zstd); any other
+         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
+         e = self.entry(path)
+         if not e['method']: return self.read_at(cast(int, e['off']) + self.stored_header, e['size'], e['encrypted'])
+         import zlib
+         bad = (zlib.error,)   # a block its decoder refuses
+         if e['method'] == 'Zlib': decode = zlib_block
++        elif e['method'] == 'Zstd':
++            zstd = zstd_mod()
++            decode = zstd_block; bad = (zstd.ZstdError,)
+         elif e['method'] == 'LZ4': import lz4.block; decode = lambda b, k: lz4.block.decompress(b, uncompressed_size=lz4_raw(b, k, path)); bad = (lz4.block.LZ4BlockError,)
+         elif not decode: raise ValueError(f'{path} is {e["method"]}-compressed in the pak')
+         out, left = [], e['raw']
+@@ -400,6 +403,22 @@ class Pak:
+             out.append(b); left -= k
+         return b''.join(out)
+ 
++def zstd_mod():
++    try: from compression import zstd
++    except ImportError:
++        import importlib
++        return importlib.import_module('backports.zstd')
++    return zstd
++
++
++def zstd_block(b, k):
++    """One Zstandard frame bounded by the pak block's raw size, including frames without a content size."""
++    zstd = zstd_mod()
++    z = zstd.ZstdDecompressor(); out = z.decompress(b, max_length=k + 1)
++    if not z.eof or z.unused_data or len(out) != k:
++        raise zstd.ZstdError(f'the frame does not end at its {k:#x} raw bytes')
++    return out
++
+ def zlib_block(b, k):
+     """A Zlib block of k raw bytes: inflated no further than k (a damaged stream could inflate about 1,000 times its size), short when the stream ends early"""
+     import zlib
+diff --git a/dm/tools/tests/test_uepak_v8.py b/dm/tools/tests/test_uepak_v8.py
+index 41728577..2cea5929 100644
+--- a/dm/tools/tests/test_uepak_v8.py
++++ b/dm/tools/tests/test_uepak_v8.py
+@@ -24,14 +24,14 @@ def entry(off, size, raw, meth, blocks, bsz, short=False):
+     return b + struct.pack('<BI', 0, bsz)
+ 
+ 
+-def pak(path, files, *, short=False, fifth_slot=False):
++def pak(path, files, *, short=False, fifth_slot=False, codec=None):
+     """files: [(name, data, compress)] → a version 8 pak whose footer names Zlib as method 1 or 5"""
+     body, index = b'', b''
+     method = 5 if fifth_slot else 1
+     for name, data, comp in files:
+         off = len(body)
+         if comp:
+-            z = zlib.compress(data)
++            z = (codec[1] if codec else zlib.compress)(data)
+             head = len(entry(0, 0, 0, method, [(0, 0)], 0, short))
+             e = entry(off, len(z), len(data), method, [(head, head + len(z))], 0x10000, short)
+             body += e + z
+@@ -42,6 +42,7 @@ def pak(path, files, *, short=False, fifth_slot=False):
+     index = fstr('../../../') + struct.pack('<i', len(files)) + index
+     names = bytes(32 * 4) + b'Zlib'.ljust(28, b'\0') if fifth_slot else b'Zlib'.ljust(32, b'\0') + bytes(32 * (3 if short else 4))
+     foot = bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 8, len(body), len(index)) + bytes(20) + names
++    if codec: foot = foot.replace(b'Zlib', codec[0].encode())
+     path.write_bytes(body + index + foot)
+ 
+ 
+@@ -61,6 +62,20 @@ class Version8(unittest.TestCase):
+         self.shader = b'LSLG' + bytes(range(256)) * 8
+         pak(self.p, [('AT/Content/M_Test.uexp', self.shader, True), ('Engine/Config/a.ini', b'[x]\n', False)])
+ 
++    def test_zstd_pak_blocks_do_not_use_the_game_decoder(self):
++        zstd = uepak.zstd_mod()
++        pak(self.p, [('Game/Material.uexp', self.shader, True)], codec=('Zstd', zstd.compress))
++        pk = uepak.Pak(str(self.p))
++        def wrong_decoder(*args): self.fail('Zstd must not go to the game decoder')
++        self.assertEqual(pk.read('Game/Material.uexp', decode=wrong_decoder), self.shader)
++
++    def test_zstd_blocks_reject_wrong_sizes_and_incomplete_frames(self):
++        zstd = uepak.zstd_mod()
++        data = zstd.compress(self.shader)
++        for block, size in [(data, len(self.shader) - 1), (data, len(self.shader) + 1), (data[:-1], len(self.shader)), (data + b'extra', len(self.shader))]:
++            with self.subTest(size=size, stored=len(block)), self.assertRaises(zstd.ZstdError):
++                uepak.zstd_block(block, size)
++
+     def test_footer(self):
+         with open(self.p, 'rb') as f: enc, _, _, methods, ver = uepak.footer(f)
+         self.assertEqual((enc, ver, methods[0]), (0, 8, 'Zlib'))

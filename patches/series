@@ -62,3 +62,4 @@
 0076-host-web-report-script-window-closure.patch
 0077-host-account-hand-open-users-to-the-next-program.patch
 0078-rewriter-nro-separate-writable-data-from-code.patch
+0079-packing-unreal-decode-zstd-pak-blocks.patch
