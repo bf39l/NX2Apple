@@ -64,3 +64,4 @@
 0078-rewriter-nro-separate-writable-data-from-code.patch
 0079-packing-unreal-decode-zstd-pak-blocks.patch
 0080-packing-allow-damaged-matching-shader-tables.patch
+0081-host-settings-legacy-language-list.patch

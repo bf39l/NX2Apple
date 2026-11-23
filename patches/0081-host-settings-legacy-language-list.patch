@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Mon, 23 Nov 2026 12:30:00 +1300
+Subject: [PATCH] host/settings: preserve the legacy 15-language list
+
+Upstream-Status: pending
+Reason: SDK 1-3 language wrappers use the fixed-size legacy settings interface
+Issue: local Xenoblade Chronicles 2 Japanese 2.0.2 startup (0100F3400332C000)
+
+Return the original 15 language codes for known SDK majors before 4.
+Keep the modern fallback and code conversion/comparison behavior intact.
+Test count/list agreement, short buffers, untouched tails and modern SDKs.
+
+Sanitizer-backed language tests pass. The affected game passes its startup
+assertion and renders its language-selection screen through frame 900.
+---
+diff --git a/dm/host/hle_sdk16.c b/dm/host/hle_sdk16.c
+index 39f6d29930adf43538d00a8c275478d4ccc53e09..4de4df08da02eeb8206ede5ace1add6b35dca595 100644
+--- a/dm/host/hle_sdk16.c
++++ b/dm/host/hle_sdk16.c
+@@ -409,16 +409,22 @@ HLE_FORCE("_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE", "language enum 
+     if ((unsigned)lang < sizeof k_lang_code / sizeof *k_lang_code) strncpy(code, k_lang_code[lang], sizeof code);
+     uint64_t v; memcpy(&v, code, 8); return v;
+ }
++// Before SDK 4 the wrappers use set commands 1/3, whose list is fixed at
++// 15 entries. SDK 4+ uses the extensible commands 5/6 instead.
++static int settings_language_count(void) {
++    int major = dm_sdk_major();
++    return major > 0 && major < 4 ? 15 : LANG_FALLBACK_COUNT;
++}
+ // The legacy settings-service list in nn::settings::Language order. The loader leaves verified self-contained SDK implementations bound to their guest exports.
+ // Returns how many were written (Paper Mario: The Thousand-Year Door, SDK 15:
+ // nnMain asks for 32 and takes the index of GetDesiredLanguage's code in the list as its language, main+0x327888; the SDK's own version aborted in sm::Initialize)
+ HLE_FORCE("_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi", "available language codes (settings-service fallback)", int, h_set_AvailLang, char *out, int count) {
+-    int n = 0;
+-    for (; n < count && n < LANG_FALLBACK_COUNT; n++) { memset(out + 8 * n, 0, 8); strncpy(out + 8 * n, k_lang_code[n], 8); }
++    int n = 0, limit = settings_language_count();
++    for (; n < count && n < limit; n++) { memset(out + 8 * n, 0, 8); strncpy(out + 8 * n, k_lang_code[n], 8); }
+     return n;
+ }
+ // How many codes that list holds (Catherine: Full Body, SDK 8.2.1: nnMain compares LanguageCode::Make(0 … count − 1) with GetDesiredLanguage's code and keeps the matching index,
+ // main+0x117590; the SDK's own version aborted in sm::Initialize)
+ HLE_FORCE("_ZN2nn8settings29GetAvailableLanguageCodeCountEv", "number of available language codes (settings-service fallback)", int, h_set_AvailLangN, void) {
+-    return LANG_FALLBACK_COUNT;
++    return settings_language_count();
+ }
+diff --git a/dm/host/tests/t_language.c b/dm/host/tests/t_language.c
+index acf2779c0cc1f2f169fdfc216453f06398c1dbc3..8e7d8deaba0fd23b12e30db7f1204ef57229509b 100644
+--- a/dm/host/tests/t_language.c
++++ b/dm/host/tests/t_language.c
+@@ -7,7 +7,8 @@ module_t *g_mod;
+ int g_nmod;
+ uint64_t g_t0_ns;
+ uint64_t now_ns(void) { return 0; }
+-int dm_sdk_major(void) { return 20; }
++static int sdk_major = 20;
++int dm_sdk_major(void) { return sdk_major; }
+ int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
+ module_t *module_of(const void *p) { (void)p; return NULL; }
+ void *guest_sym(const char *name) { (void)name; return NULL; }
+@@ -68,6 +69,31 @@ int main(void) {
+     CHECK(h_set_AvailLang(available, 3) == 3 && !memcmp(available + 16, "fr\0\0\0\0\0\0", 8)
+           && (unsigned char)available[24] == 0xa5, "a short buffer takes the first codes");
+     CHECK(!h_set_AvailLang(NULL, 0), "an empty buffer writes nothing");
++
++    // SDK 1-3 use settings commands 1/3: a fixed 15-code list. SDK 4+
++    // use the extended commands 5/6 and retain the existing fallback list.
++    const int legacy_sdks[] = {1, 2, 3};
++    for (unsigned i = 0; i < sizeof legacy_sdks / sizeof *legacy_sdks; i++) {
++        sdk_major = legacy_sdks[i]; memset(available, 0xa5, sizeof available);
++        CHECK(h_set_AvailLangN() == 15, "legacy settings count is 15");
++        CHECK(h_set_AvailLang(available, 19) == 15, "legacy settings list stops at 15");
++        for (int n = 0; n < 15; n++) {
++            char expected[8] = {0}; memcpy(expected, codes[n], strlen(codes[n]));
++            CHECK(!memcmp(available + n * 8, expected, 8), "legacy list preserves the original codes");
++        }
++        for (unsigned n = 15 * 8; n < sizeof available; n++)
++            CHECK((unsigned char)available[n] == 0xa5, "legacy list leaves the tail untouched");
++        CHECK(h_set_AvailLang(available, 3) == 3, "legacy list respects a smaller buffer");
++        CHECK(!h_set_AvailLang(NULL, 0), "legacy empty list writes nothing");
++    }
++    const int modern_sdks[] = {0, 4, 10, 20};
++    for (unsigned i = 0; i < sizeof modern_sdks / sizeof *modern_sdks; i++) {
++        sdk_major = modern_sdks[i];
++        CHECK(h_set_AvailLangN() == 18, "modern or unknown SDK retains the fallback count");
++        CHECK(h_set_AvailLang(available, 19) == 18, "modern or unknown SDK retains the fallback list");
++    }
++    sdk_major = 20;
++
+     printf("language: %d checks, %d failed\n", checks, fails);
+     return fails != 0;
+ }
