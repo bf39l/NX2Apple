@@ -86,7 +86,26 @@ import NXLauncher
 
     // MARK: Overview
 
+    /// A game nxkit built without a game profile (v0lumehi/nxkit#54): what that means, what nxkit detected, and Report, which opens the
+    /// prefilled issue in the browser. On the Overview above everything, since the game may not start or may render wrong.
+    @ViewBuilder private var genericBuildNotice: some View {
+        if game.status == .ready, let profile = game.genericBuild {
+            let detected = NxkitGenericBuildRow.detected(profile, t)
+            ConsoleNoticeCard(tone: .warning, title: t("nxkit.generic.title"),
+                              detail: t("nxkit.generic.note") + (detected.isEmpty ? "" : "\n" + detected),
+                              action: genericReportAction)
+        }
+    }
+
+    private var genericReportAction: (title: String, id: String, scope: String, perform: () -> Void)? {
+        guard game.genericReport != nil else { return nil }
+        let driver = driver, id = game.id
+        return (title: t("nxkit.feedback.report"), id: "console.gamePage.genericReport", scope: scope,
+                perform: { driver.openGenericBuildReport(id) })
+    }
+
     @ViewBuilder private var overview: some View {
+        genericBuildNotice
         if game.status == .ready {
             ConsoleStatsCard(items: [
                 (t("console.lastPlayed"), game.lastPlayed.map { ConsoleTimes.relative($0, now: state.time, lang: lang) } ?? t("console.notPlayed")),
@@ -101,6 +120,17 @@ import NXLauncher
                 ConsoleRowDivider()
                 ConsoleListRow(id: "console.gamePage.options", scope: scope, title: t("console.gamePage.options"),
                                subtitle: t("console.gamePage.optionsNote")) { driver.openOptions(game.id) }
+                if game.builtMacEngines.count > 1,
+                   let active = game.activeMacEngine ?? game.builtMacEngines.first,
+                   let nextIndex = game.builtMacEngines.firstIndex(of: active).map({ ($0 + 1) % game.builtMacEngines.count }) {
+                    let nextEngine = game.builtMacEngines[nextIndex]
+                    ConsoleRowDivider()
+                    ConsoleListRow(id: "console.gamePage.defaultEngine", scope: scope,
+                                   title: String(format: t("console.manage.setDefault"), active.displayName),
+                                   subtitle: String(format: t("library.setDefaultEngine"), nextEngine.displayName)) {
+                        driver.setDefaultMacEngine(game.id, upstream: nextEngine)
+                    }
+                }
                 ConsoleRowDivider()
                 manageRow
             }
@@ -148,6 +178,11 @@ import NXLauncher
             (t("console.gamePage.status"), t(game.status.labelKey)),
         ])
         if game.olderTools { ConsoleNoticeCard(tone: .warning, title: t("library.olderToolsHelp")) }
+        if game.status == .ready, let profile = game.genericBuild {
+            // the same note, short: who opens the build sees it was built without a game profile
+            ConsoleNoticeCard(tone: .warning, title: t("nxkit.generic.title"), detail: NxkitGenericBuildRow.detected(profile, t),
+                              action: genericReportAction)
+        }
         ConsoleGroupedList {
             // A game that is not built builds from here (#1111): now when nothing builds, after the running build otherwise
             if game.status == .needsBuild && !state.builds.running {
@@ -189,6 +224,32 @@ import NXLauncher
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Console.Space.xl) {
+            if game.builtMacEngines.count > 1 {
+                let active = game.activeMacEngine ?? game.builtMacEngines.first
+                ConsoleGroupedList(title: t("console.manage.engineBuilds")) {
+                    ForEach(Array(game.builtMacEngines.enumerated()), id: \.element) { index, upstream in
+                        if index > 0 { ConsoleRowDivider() }
+                        ConsoleListRow(
+                            id: "console.manage.launch." + upstream.rawValue,
+                            scope: "console.manage",
+                            title: String(format: t("library.launchWithEngine"), upstream.displayName),
+                            subtitle: upstream == active ? t("library.defaultBuildTag") : String(format: t("library.setDefaultEngine"), upstream.displayName)
+                        ) {
+                            driver.launchWithMacEngine(game.id, upstream: upstream)
+                        }
+                    }
+                    ForEach(game.builtMacEngines.filter { $0 != active }, id: \.self) { upstream in
+                        ConsoleRowDivider()
+                        ConsoleListRow(
+                            id: "console.manage.default." + upstream.rawValue,
+                            scope: "console.manage",
+                            title: String(format: t("library.setDefaultEngine"), upstream.displayName)
+                        ) {
+                            driver.setDefaultMacEngine(game.id, upstream: upstream)
+                        }
+                    }
+                }
+            }
             ConsoleGroupedList(title: t("console.tab.build")) {
                 ConsoleListRow(id: "console.manage.desktop", scope: "console.manage", title: t("console.openOnDesktop")) { driver.openOnDesktop(game.id) }
             }

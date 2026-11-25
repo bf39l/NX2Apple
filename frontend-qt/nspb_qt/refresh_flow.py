@@ -29,6 +29,7 @@ from . import inputs as _inputs
 from . import library as lib
 from . import platform_util as pu
 from . import post_build_cleanup as pbc
+from . import style
 from .app_update import APP_VERSION
 
 try:
@@ -53,18 +54,53 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# 1. Game Update Catalog (102 TitleIDs synced with CHANGELOG.md & Swift)
+# 1. Game Update Catalog (123 TitleIDs synced with CHANGELOG.md & Swift)
 # ---------------------------------------------------------------------------
 
 DEFAULT_CATALOG_VERSION = '1.2.0'
 
 GAME_UPDATED_VERSIONS: dict[str, str] = {
-    # 1.5.0 (80 games)
+    # 1.5.1 (35 games)
+    '01001C8016B4E000': '1.5.1',
+    '0100317013770000': '1.5.1',
+    '010037C022390000': '1.5.1',
+    '010038B015560000': '1.5.1',
+    '01004200189F4000': '1.5.1',
+    '010051C0134F8000': '1.5.1',
+    '01005CA01580E000': '1.5.1',
+    '010062E01FE0C000': '1.5.1',
+    '010063100B2C2000': '1.5.1',
+    '010067300059A000': '1.5.1',
+    '01006DC010326000': '1.5.1',
+    '01006F8002326000': '1.5.1',
+    '010070E022546000': '1.5.1',
+    '01007330027EE000': '1.5.1',
+    '010074F013262000': '1.5.1',
+    '01007D7001D0E000': '1.5.1',
+    '01007EF00011E000': '1.5.1',
+    '01008B900DC0A000': '1.5.1',
+    '01008CB0156BC000': '1.5.1',
+    '01008F2005154000': '1.5.1',
+    '010095300B6A4000': '1.5.1',
+    '010099801C4FA000': '1.5.1',
+    '010099801C4FA001': '1.5.1',
+    '0100A00019DE0000': '1.5.1',
+    '0100B7C00933A000': '1.5.1',
+    '0100BF00112C0000': '1.5.1',
+    '0100C49025D3E000': '1.5.1',
+    '0400380020056000': '1.5.1',
+    '0400486024DEC000': '1.5.1',
+    '040074A01BF12000': '1.5.1',
+    '04008E001F098000': '1.5.1',
+    '0400A3A01EE4C000': '1.5.1',
+    '0400C3F00006E000': '1.5.1',
+    '0400C76024710000': '1.5.1',
+    '0400E88025B1A000': '1.5.1',
+    # 1.5.0 (66 games)
     '0100000000010000': '1.5.0',
     '010015100B514000': '1.5.0',
     '0100152000022000': '1.5.0',
     '01001B300B9BE000': '1.5.0',
-    '01001C8016B4E000': '1.5.0',
     '01001F5010DFA000': '1.5.0',
     '010026300BA4A000': '1.5.0',
     '010027400CDC6000': '1.5.0',
@@ -80,23 +116,19 @@ GAME_UPDATED_VERSIONS: dict[str, str] = {
     '010050F00BC1A000': '1.5.0',
     '010051701FB46000': '1.5.0',
     '010057A01E4D4000': '1.5.0',
-    '01005CA01580E000': '1.5.0',
     '01005FF002E2A000': '1.5.0',
     '010064800F66A000': '1.5.0',
     '010069401ADB8000': '1.5.0',
     '01006A800016E000': '1.5.0',
-    '01006F8002326000': '1.5.0',
     '0100726014352000': '1.5.0',
     '0100777022394000': '1.5.0',
     '01007820196A6000': '1.5.0',
     '01007A2027548000': '1.5.0',
-    '01007EF00011E000': '1.5.0',
     '0100801011C3E000': '1.5.0',
     '0100830004FB6000': '1.5.0',
     '010087701B092000': '1.5.0',
     '01008D300C50C000': '1.5.0',
     '01008F4014A74000': '1.5.0',
-    '0100A00019DE0000': '1.5.0',
     '0100A0800E9C4000': '1.5.0',
     '0100A3D008C5C000': '1.5.0',
     '0100A5C00D162000': '1.5.0',
@@ -104,13 +136,10 @@ GAME_UPDATED_VERSIONS: dict[str, str] = {
     '0100A8E016236000': '1.5.0',
     '0100AA001415E000': '1.5.0',
     '0100AA201415C000': '1.5.0',
-    '0100B7C00933A000': '1.5.0',
     '0100B99019412000': '1.5.0',
-    '0100BF00112C0000': '1.5.0',
     '0100BF500207C000': '1.5.0',
     '0100C1F0051B6000': '1.5.0',
     '0100C3601518C000': '1.5.0',
-    '0100C49025D3E000': '1.5.0',
     '0100C510166F0000': '1.5.0',
     '0100C9C00E25C000': '1.5.0',
     '0100CAA026246000': '1.5.0',
@@ -127,18 +156,12 @@ GAME_UPDATED_VERSIONS: dict[str, str] = {
     '0100F43008C44000': '1.5.0',
     '040015100B514001': '1.5.0',
     '040032B023CA4000': '1.5.0',
-    '0400380020056000': '1.5.0',
     '040041E0212AE000': '1.5.0',
-    '0400486024DEC000': '1.5.0',
     '0400569027BF4000': '1.5.0',
     '040057C02159A000': '1.5.0',
-    '040074A01BF12000': '1.5.0',
     '040077201BE50000': '1.5.0',
     '04007EF01F8AE000': '1.5.0',
-    '04008E001F098000': '1.5.0',
     '0400921025B32000': '1.5.0',
-    '0400C3F00006E000': '1.5.0',
-    '0400C76024710000': '1.5.0',
     '0400D4201C6EA000': '1.5.0',
     # 1.4.0 (16 games)
     '010012101468C000': '1.4.0',
@@ -1776,6 +1799,7 @@ if HAS_QT:
             self.setWindowTitle(self.m.t('batchRefresh.title'))
             self.setModal(True)
             self.setFixedWidth(680)
+            self.setStyleSheet(style.STYLESHEET)
 
             root_lay = QVBoxLayout(self)
             root_lay.setContentsMargins(24, 22, 24, 20)
@@ -1903,10 +1927,10 @@ if HAS_QT:
             out_d = entry.out_dir or _resolve_game_out_dir(g, getattr(self.m, 'out_dir', ''))
 
             card = QFrame()
-            card.setObjectName('subcard')
+            card.setObjectName('card')
             lay = QVBoxLayout(card)
-            lay.setContentsMargins(14, 10, 14, 10)
-            lay.setSpacing(6)
+            lay.setContentsMargins(16, 12, 16, 12)
+            lay.setSpacing(8)
 
             top = QHBoxLayout()
             top.setSpacing(10)
@@ -1940,7 +1964,10 @@ if HAS_QT:
                     if target == 'mac-app'
                     else self.m.t('batchRefresh.platformIOS')
                 )
-                cb = QCheckBox(f'[{plat_name}]')
+                from .widgets import LauncherCheckBox
+                cb = LauncherCheckBox(plat_name)
+                cb.setObjectName('platformChipCheck')
+                cb.setCursor(Qt.CursorShape.PointingHandCursor)
                 disabled_missing = (not can_fast) and a.missing_original_package
                 if disabled_missing:
                     cb.setChecked(False)
@@ -1982,7 +2009,7 @@ if HAS_QT:
                 miss_lbl = QLabel(self.m.t(miss_key))
                 miss_lbl.setObjectName('muted')
                 miss_lbl.setWordWrap(True)
-                _apply_text_color(miss_lbl, '#ffbd38')
+                _apply_text_color(miss_lbl, style.AMBER)
                 lay.addWidget(miss_lbl)
             return card
 
@@ -2051,6 +2078,7 @@ if HAS_QT:
             self.setWindowTitle(self.m.t('imgGuide.title'))
             self.setModal(True)
             self.setFixedWidth(680)
+            self.setStyleSheet(style.STYLESHEET)
 
             root_lay = QVBoxLayout(self)
             root_lay.setContentsMargins(24, 22, 24, 20)
@@ -2227,12 +2255,12 @@ if HAS_QT:
                         return
                     self.choose_img_btn.setEnabled(True)
                     if not valid:
-                        _apply_text_color(self.opt1_status_lbl, '#ff6161')
+                        _apply_text_color(self.opt1_status_lbl, style.DANGER)
                         self.opt1_status_lbl.setText(self.m.t('imgGuide.invalidImg', gname))
                         self.opt1_status_lbl.show()
                         return
                     reused_msg = self.m.t('imgGuide.driveReused', os.path.basename(picked))
-                    _apply_text_color(self.opt1_status_lbl, '#52d97a')
+                    _apply_text_color(self.opt1_status_lbl, style.GREEN)
                     self.opt1_status_lbl.setText(reused_msg)
                     self.opt1_status_lbl.show()
                     self.selected_img_path = picked

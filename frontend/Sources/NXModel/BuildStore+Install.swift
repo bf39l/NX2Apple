@@ -76,7 +76,7 @@ extension BuildStore {
 
     /// The installer with this store's tools, log, stages and process hand-off wired in. The install and the export (BuildStore+Export.swift) share it.
     func makeInstaller(respectSkipMode: Bool = true) -> ShellInstaller {
-        let python = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
+        let python = resolveBuildPython()
         var installer = ShellInstaller(xcrun: devices.xcrun, repo: repo.path, python: python, root: shellRoot, device: devices.installDevice, team: devices.signingTeam)
         installer.deviceName = devices.deviceName(devices.installDevice)
         installer.defaults = defaults
@@ -91,9 +91,13 @@ extension BuildStore {
             case ShellInstaller.installStageID: "dev.installStage"
             case ShellInstaller.copyStageID: "dev.copyStage"
             case ShellInstaller.checkStageID: "shell.checkStage"
+            case ShellInstaller.exportBuildStageID: "shell.exportBuildStage"
+            case ShellInstaller.exportPackStageID: "shell.exportPackStage"
             default: nil
             }
-            let nameArgument = s.id == ShellInstaller.projectStageID ? nil : self.devices.deviceName(self.devices.installDevice)
+            let usesDeviceArg = s.id == ShellInstaller.signStageID || s.id == ShellInstaller.installStageID
+                || s.id == ShellInstaller.copyStageID || s.id == ShellInstaller.checkStageID
+            let nameArgument = usesDeviceArg ? self.devices.deviceName(self.devices.installDevice) : nil
             if let i = self.stages.firstIndex(where: { $0.id == s.id }) {
                 self.stages[i].name = s.name; self.stages[i].state = s.state; self.stages[i].detail = s.detail
                 self.stages[i].nameKey = nameKey; self.stages[i].nameArgument = nameKey == nil ? nil : nameArgument
@@ -104,6 +108,7 @@ extension BuildStore {
                                          started: s.state == .running ? Date() : nil, nameKey: nameKey,
                                          nameArgument: nameKey == nil ? nil : nameArgument))
             }
+            self.refreshOverallProgress(parsedTotal: nil)
         } }
         installer.runner = runner
         installer.processStarted = { @Sendable p in hop { self.proc = p } }
@@ -132,7 +137,15 @@ extension BuildStore {
 
     /// Steps 4 to 7 of the shared app (ShellInstall.swift) for a game whose framework is built and whose archive is packed: the
     /// shell's project, signing, the install over the app that is already there, and the game data the device lacks.
-    package func installShell(framework: String, titleID: String, name: String, archive: String, dataOnly: Bool = false) {
+    package func installShell(
+        framework: String,
+        titleID: String,
+        name: String,
+        archive: String,
+        dataOnly: Bool = false,
+        didUpdateImg: Bool? = nil,
+        updatedImgPath: String? = nil
+    ) {
         buildingGame = true
         runningTarget = BuildTarget.ios
         beginOperation(dataOnly ? .sendingGameData : .installing, game: name, titleID: titleID, destination: .target)
@@ -140,12 +153,22 @@ extension BuildStore {
         if dataOnly { stoppedByPlayer = false }
         running = true
         finderShown = false
-        if dataOnly { failure = nil; done = false; doneNote = "" }
+        if dataOnly { failure = nil; done = false; doneNote = ""; shellUpdatedOnDevice = false }
+        else { shellUpdatedOnDevice = false }
         shellBatchRetry = nil
         shellRetry = (framework, titleID, name, archive)
-        let installer = makeInstaller(respectSkipMode: !dataOnly)
+        let shouldTransferUpdatedImg = didUpdateImg ?? needsReplaceOldImgReminder
+        let effectiveImgPath = updatedImgPath ?? self.updatedImgPath
+        let targetEntryID = activeQueuedEntryID
+        let fastRefresh = lastRunWasFastRefresh ? installRecovery.lastFastRefresh : nil
+        setInstallRecovery(.install(
+            framework: framework, titleID: titleID, name: name, archive: archive, dataOnly: dataOnly,
+            didUpdateImg: shouldTransferUpdatedImg, updatedImgPath: effectiveImgPath, fastRefresh: fastRefresh
+        ))
+        let installer = makeInstaller(respectSkipMode: !dataOnly && !shouldTransferUpdatedImg)
         let target = devices
         let device = devices.installDevice
+        let deviceDisplayName = target.deviceName(device)
         DispatchQueue.global(qos: .userInitiated).async {
             let result = dataOnly ? installer.installData(titleID: titleID, archive: archive)
                                   : installer.install(framework: framework, titleID: titleID, name: name, archive: archive)
@@ -157,10 +180,24 @@ extension BuildStore {
                 target.copyEnded()
                 if self.stopping {
                     self.stopping = false; self.running = false
+                    self.failure = nil; self.clearInstallRecovery(includeFastRefresh: true)
                     self.resetProgress(); self.doneNote = self.t("msg.stopped"); self.cleanupStaging()
                     return
                 }
                 guard result.ok else {
+                    if shouldTransferUpdatedImg {
+                        self.needsReplaceOldImgReminder = true
+                        self.updatedImgPath = effectiveImgPath
+                        self.queue?.updateImgStatus(
+                            entryID: targetEntryID,
+                            titleID: titleID,
+                            imgStatus: .manualReplace(imgPath: effectiveImgPath, reason: result.message)
+                        )
+                    } else {
+                        self.needsReplaceOldImgReminder = false
+                        self.updatedImgPath = ""
+                        self.queue?.updateImgStatus(entryID: targetEntryID, titleID: titleID, imgStatus: .unchanged)
+                    }
                     self.finishInstall(result.message)
                     if let kind = result.failure {
                         let detail = (kind == .appIDLimit && !result.detail.isEmpty) ? result.detail : nil
@@ -170,8 +207,33 @@ extension BuildStore {
                     } else if let step = result.step { self.noteInstallFailure(step, error: result.message) }
                     return
                 }
+                if shouldTransferUpdatedImg {
+                    if result.copySkipped || archive.isEmpty {
+                        self.needsReplaceOldImgReminder = true
+                        self.updatedImgPath = effectiveImgPath
+                        self.queue?.updateImgStatus(
+                            entryID: targetEntryID,
+                            titleID: titleID,
+                            imgStatus: .manualReplace(imgPath: effectiveImgPath, reason: result.copySkipped ? self.t("dev.copySkipped") : nil)
+                        )
+                    } else {
+                        self.needsReplaceOldImgReminder = false
+                        self.updatedImgPath = ""
+                        let rawName = effectiveImgPath.isEmpty ? "romfs.img" : (effectiveImgPath as NSString).lastPathComponent
+                        self.queue?.updateImgStatus(
+                            entryID: targetEntryID,
+                            titleID: titleID,
+                            imgStatus: .transferred(imgName: rawName, deviceName: deviceDisplayName)
+                        )
+                    }
+                } else {
+                    self.needsReplaceOldImgReminder = false
+                    self.updatedImgPath = ""
+                    self.queue?.updateImgStatus(entryID: targetEntryID, titleID: titleID, imgStatus: .unchanged)
+                }
                 self.installedOn = device
                 self.installedAppPath = result.appPath
+                self.shellUpdatedOnDevice = result.shellUpdated
                 self.installedDataComplete = !result.copySkipped
                 self.finishInstall(nil, note: result.message)
             }
@@ -185,7 +247,8 @@ extension BuildStore {
         beginOperation(.installing, game: nil, titleID: nil, destination: .target)
         stopping = false; stoppedByPlayer = false; installCancel.set(false); installPhaseActive = true
         running = true; done = false; doneNote = ""; failure = nil; stages = []
-        needsReplaceOldImgReminder = false; updatedImgPath = ""
+        needsReplaceOldImgReminder = false; updatedImgPath = ""; shellUpdatedOnDevice = false
+        setInstallRecovery(.installBuilt(framework: framework, titleID: titleID, name: name))
         finderShown = false
         let installer = makeInstaller()
         let device = devices.installDevice
@@ -195,6 +258,7 @@ extension BuildStore {
                 self.installPhaseActive = false
                 if self.stopping {
                     self.stopping = false; self.running = false
+                    self.failure = nil; self.clearInstallRecovery(includeFastRefresh: true)
                     self.resetProgress(); self.doneNote = self.t("msg.stopped"); self.cleanupStaging()
                     return
                 }
@@ -210,6 +274,7 @@ extension BuildStore {
                 }
                 self.installedOn = device
                 self.installedAppPath = result.appPath
+                self.shellUpdatedOnDevice = result.shellUpdated
                 self.onBuiltGamesInstalled(result.appPath, device)
                 self.finishInstall(nil, note: result.message)
             }
@@ -225,16 +290,26 @@ extension BuildStore {
                        titleID: games.count == 1 ? last.titleID : nil, destination: .target)
         stopping = false; installCancel.set(false); installPhaseActive = true
         if dataOnly { stoppedByPlayer = false }
-        running = true; done = false; doneNote = ""; failure = nil
+        running = true; done = false; doneNote = ""; failure = nil; shellUpdatedOnDevice = false
         if dataOnly { stages = [] }
         finderShown = false
         shellBatchRetry = games
+        setInstallRecovery(.installBatch(games: games, dataOnly: dataOnly))
         shellRetry = (last.framework, last.titleID, last.name, last.archive)
         let batchGames = games.map {
-            ShellInstaller.BatchGame(framework: $0.framework, titleID: $0.titleID, name: $0.name, archive: $0.archive,
-                                     pickedArtwork: pickedArtworkForTitleID($0.titleID))
+            ShellInstaller.BatchGame(
+                framework: $0.framework,
+                titleID: $0.titleID,
+                name: $0.name,
+                archive: $0.archive,
+                pickedArtwork: pickedArtworkForTitleID($0.titleID),
+                queueEntryID: $0.queueEntryID,
+                didUpdateImg: $0.didUpdateImg,
+                updatedImgPath: $0.updatedImgPath
+            )
         }
-        let installer = makeInstaller(respectSkipMode: !dataOnly)
+        let anyImgUpdated = games.contains(where: \.didUpdateImg)
+        let installer = makeInstaller(respectSkipMode: !dataOnly && !anyImgUpdated)
         let root = installer.root
         let target = devices
         let device = devices.installDevice
@@ -251,9 +326,14 @@ extension BuildStore {
                 target.copyEnded()
                 if self.stopping {
                     self.stopping = false; self.running = false
+                    self.failure = nil; self.clearInstallRecovery(includeFastRefresh: true)
                     self.resetProgress(); self.doneNote = self.t("msg.stopped"); self.cleanupStaging()
                     return
                 }
+                self.applyBatchImgResults(result.batchGameResults)
+                // Batch installations track per-entry img disposition on QueueEntry rather than the single-game scalar reminder.
+                self.needsReplaceOldImgReminder = false
+                self.updatedImgPath = ""
                 guard result.ok else {
                     if !result.appPath.isEmpty {
                         self.installedOn = device
@@ -274,6 +354,7 @@ extension BuildStore {
                 }
                 self.installedOn = device
                 self.installedAppPath = result.appPath
+                self.shellUpdatedOnDevice = result.shellUpdated
                 self.onBatchShellInstalled(games, result.appPath, device)
                 self.installedDataComplete = !result.copySkipped
                 self.finishInstall(nil, note: result.message)
@@ -309,9 +390,14 @@ extension BuildStore {
         return true
     }
 
-    package func finishInstall(_ failure: String?, note: String? = nil) {
+    package func finishInstall(_ failure: String?, note: String? = nil, completeProgress: Bool = true) {
         running = false
         done = failure == nil
+        if failure == nil && completeProgress {
+            completeOverallProgress()
+        } else {
+            refreshOverallProgress(parsedTotal: nil)
+        }
         var resolved = failure ?? note ?? String(format: t("dev.installed"), devices.deviceName(devices.installDevice))
         if failure == nil, !deferShellPackaging, needsReplaceOldImgReminder {
             let imgName = updatedImgPath.isEmpty ? "romfs.img" : (updatedImgPath as NSString).lastPathComponent
@@ -334,13 +420,14 @@ extension BuildStore {
             doneNote = String(format: t("dev.reinstallMissing"), shortPath(app))
             then?(); return
         }
+        let deviceName = devices.deviceName(device)
         buildingGame = false; runningTarget = BuildTarget.ios
-        beginOperation(.installing, game: nil, titleID: nil, destination: .target)
-        needsReplaceOldImgReminder = false; updatedImgPath = ""
+        beginOperation(.installing, game: nil, titleID: nil, destination: .device(deviceName))
+        needsReplaceOldImgReminder = false; updatedImgPath = ""; shellUpdatedOnDevice = false
         running = true
-        runTool(id: 1004, name: String(format: t("dev.reinstallStage"), devices.deviceName(device)),
+        runTool(id: 1004, name: String(format: t("dev.reinstallStage"), deviceName),
                 BuildCommands.reinstallCommand(xcrun: devices.xcrun, device: device, app: app), nameKey: "dev.reinstallStage",
-                nameArgument: devices.deviceName(device), step: BuildProgress.installStep) { error in
+                nameArgument: deviceName, step: BuildProgress.installStep) { error in
             if let error {
                 // The app is still on the device: a failed reinstall is a note, not a failed build
                 self.running = false
@@ -351,130 +438,6 @@ extension BuildStore {
                 self.cleanupStaging()
             }
             then?()
-        }
-    }
-
-    /// Renew the shared app's signature (a free Apple ID's profile lasts 7 days). The same xcodebuild parameters as
-    /// the install, run on the cached project and derived data: Xcode reuses the compiled products and only signs
-    /// again, then devicectl installs the app over itself. PRODUCT_BUNDLE_IDENTIFIER is the one shell.json holds, so the
-    /// device keeps the app's Documents (game data, saves).
-    package func resignOnDevice(app: String, device: String, then: (() -> Void)? = nil) {
-        installedOn = ""
-        guard !device.isEmpty, !app.isEmpty else { then?(); return }
-        guard !devices.signingTeam.isEmpty else {
-            doneNote = t("dev.resignNoTeam")
-            then?(); return
-        }
-        // An app from before the shared app has its own project and cannot be signed again here: build the game again
-        guard let shell = ShellInstall.paths(ofApp: app) else {
-            doneNote = t("dev.resignOlder")
-            then?(); return
-        }
-        guard FileManager.default.fileExists(atPath: shell.project) else {
-            doneNote = String(format: t("dev.resignNoProject"), shortPath(shell.project))
-            then?(); return
-        }
-        let xcrun = devices.xcrun, team = devices.signingTeam, name = devices.deviceName(device)
-        let loaded = ShellLibrary.load(root: shell.root)
-        var library = loaded
-        library.dropMissing()
-        library.games.removeAll { ShellInstall.missingFile(inFramework: $0.framework, titleID: $0.titleID) != nil }
-        if library != loaded { try? library.save(root: shell.root) }
-        ShellInstall.pruneEmbeddedFrameworks(root: shell.root, keeping: library.games)
-        let needsProjectUpdate = ShellInstall.projectNeedsUpdate(root: shell.root, games: library.games)
-        if needsProjectUpdate, library.games.isEmpty {
-            doneNote = String(format: t("dev.resignNoProject"), shortPath(shell.project))
-            then?(); return
-        }
-        let bundle = library.bundleID
-        let resources = Bundle.main.resourceURL?.path, repoPath = repo.path, home = self.home, runner = self.runner
-        buildingGame = false; runningTarget = BuildTarget.ios
-        beginOperation(.renewingSignature, game: nil, titleID: nil, destination: .target)
-        stopping = false; stoppedByPlayer = false; installPhaseActive = true
-        needsReplaceOldImgReminder = false; updatedImgPath = ""
-        running = true
-        // The shared app is signed again under the identifier shell.json holds, so the device keeps its Documents
-        let command = ShellInstall.buildCommand(xcrun: xcrun, root: shell.root, device: device, team: team, bundleID: bundle)
-        let signAndInstall = {
-            DispatchQueue.global(qos: .userInitiated).async {
-                ShellInstall.refreshProjectLinks(root: shell.root, resources: resources, repo: repoPath)
-                let stagedProfiles = AppSignature.stageProfilesForResign(
-                    app: app, bundleID: bundle, team: team, home: home, runner: runner
-                )
-                hop {
-                    self.installPhaseActive = false
-                    if self.stopping {
-                        self.stopping = false
-                        stagedProfiles.rollback()
-                        self.running = false
-                        self.doneNote = self.t("msg.stopped")
-                        then?(); return
-                    }
-                    self.stagedResignProfiles = stagedProfiles
-                    self.runTool(id: 1006, name: String(format: self.t("dev.resignStage"), name),
-                                 command, nameKey: "dev.resignStage", nameArgument: name, step: BuildProgress.xcodeStep) { error in
-                        if let error, !error.isEmpty {
-                            stagedProfiles.rollback()
-                            self.stagedResignProfiles = nil
-                            self.doneNote = String(format: self.t("dev.resignFailed"), error)
-                            self.noteInstallFailure(.sign, error: error)
-                            self.running = false
-                            then?(); return
-                        }
-                        stagedProfiles.commit()
-                        self.stagedResignProfiles = nil
-                        self.runTool(id: 1007, name: String(format: self.t("dev.installStage"), name),
-                                     BuildCommands.reinstallCommand(xcrun: xcrun, device: device, app: app), nameKey: "dev.installStage",
-                                     nameArgument: name, step: BuildProgress.installStep) { installError in
-                            if let installError {
-                                self.doneNote = String(format: self.t("dev.installFailed"), installError)
-                            } else {
-                                ShellLibrary.recordInstalled(root: shell.root, device: device)
-                                self.installedOn = device
-                                self.installedAppPath = app
-                                self.doneNote = String(format: self.t("dev.resigned"), name)
-                            }
-                            self.running = false
-                            then?()
-                        }
-                    }
-                }
-            }
-        }
-        guard needsProjectUpdate else {
-            signAndInstall()
-            return
-        }
-        let engineRoot = EngineLayout.root(repoPath)
-        let python = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
-        let toolPath = BuildCommands.toolPath("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", python: python)
-        guard let package = ShellInstall.shellPackage(resources: resources, repo: repoPath) else {
-            let looked = ([resources, repoPath].compactMap { $0 }.filter { !$0.isEmpty }).map { $0 + "/frontend-ios" }.joined(separator: ", ")
-            self.installPhaseActive = false
-            self.running = false
-            self.doneNote = String(format: self.t("shell.projectFailed"), "no frontend-ios Swift package (Package.swift) in " + looked)
-            then?(); return
-        }
-        var env = ShellInstall.projectEnvironment(root: shell.root, frameworks: library.games.map(\.framework), bundleID: bundle,
-                                                  team: team, python: python, path: toolPath, home: NSHomeDirectory(), user: NSUserName(),
-                                                  tmp: NSTemporaryDirectory(), package: package, engine: engineRoot)
-        env.merge(BundledTools.environment(for: python)) { $1 }
-        env.merge(seedEnvironment) { $1 }
-        let xcconfig = shell.root + "/project/Gen/dm.xcconfig"
-        if (try? String(contentsOfFile: xcconfig, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
-            || FileManager.default.fileExists(atPath: shell.root + "/project/entitlements-empty") {
-            env["DM_ENTITLEMENTS"] = ""
-        }
-        runTool(id: ShellInstaller.projectStageID, name: t("shell.projectStage"),
-                ShellInstall.projectCommand(package: package), environment: env, nameKey: "shell.projectStage", step: { _ in nil }) { projectError in
-            if let projectError, !projectError.isEmpty {
-                self.installPhaseActive = false
-                self.running = false
-                self.doneNote = String(format: self.t("shell.projectFailed"), projectError)
-                then?(); return
-            }
-            ShellInstall.writeProjectFrameworks(root: shell.root, games: library.games)
-            signAndInstall()
         }
     }
 
@@ -498,7 +461,8 @@ extension BuildStore {
         }
         let stageID = 1005
         let stageName = t("dev.saveStage")
-        let groupPython = deps.pythonPath.isEmpty ? "/usr/bin/python3" : deps.pythonPath
+        let resolvedPy = resolveBuildPython()
+        let groupPython = resolvedPy.isEmpty ? "/usr/bin/python3" : resolvedPy
         let lang = localizer.lang
         let runner = self.runner
         let cancel = installCancel
@@ -634,15 +598,18 @@ extension BuildStore {
         }
         append("[\(name)] \(command.joined(separator: " "))\n")
         let env = environment ?? ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSHomeDirectory(), "USER": NSUserName(), "LANG": "en_US.UTF-8"]
+        let resolvedGroupPy = resolveBuildPython()
         let launch = ProcessLaunch(command, environment: env,
-                                   groupPython: deps.pythonPath.isEmpty ? "/usr/bin/python3" : deps.pythonPath)
+                                   groupPython: resolvedGroupPy.isEmpty ? "/usr/bin/python3" : resolvedGroupPy)
         let utf8 = UTF8StreamDecoder.Locked()
-        var buffer = "", lastError = ""
+        var buffer = "", lastError = "", devModeError = ""
         let handleLine: @MainActor (BuildStore, String) -> Void = { store, raw in
             var line = raw
             if line.unicodeScalars.last == "\r" { line.unicodeScalars.removeLast() }
             store.append(line + "\n")
-            if line.contains("error:") || line.hasPrefix("ERROR:") { lastError = line.trimmingCharacters(in: .whitespaces) }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if line.contains("error:") || line.hasPrefix("ERROR:") { lastError = trimmed }
+            if BuildFailureClassifier.isDeveloperModeDisabled(trimmed) { devModeError = trimmed }
             if let s = step(line), let i = store.stages.firstIndex(where: { $0.id == id }) {
                 store.stages[i].detail = s.detail
                 if let percent = s.percent { store.stages[i].percent = percent }
@@ -677,6 +644,7 @@ extension BuildStore {
                 if self.stopping {
                     self.installPhaseActive = false
                     self.stopping = false; self.running = false
+                    self.failure = nil; self.clearInstallRecovery(includeFastRefresh: true)
                     self.resetProgress(); self.doneNote = self.t("msg.stopped"); self.cleanupStaging()
                     return
                 }
@@ -685,7 +653,8 @@ extension BuildStore {
                     self.stages[i].state = ok ? .done : .failed
                     if ok { self.stages[i].percent = 100; self.stages[i].detail = "" }
                 }
-                then(ok ? nil : (lastError.isEmpty ? String(format: self.t("msg.exitCode"), status) : lastError))
+                let resolvedError = !devModeError.isEmpty ? devModeError : (lastError.isEmpty ? String(format: self.t("msg.exitCode"), status) : lastError)
+                then(ok ? nil : resolvedError)
             }
         }
         do { proc = try runner.start(launch, onOutput: onOutput, onExit: onExit) } catch { installPhaseActive = false; then(error.localizedDescription) }

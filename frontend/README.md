@@ -169,7 +169,7 @@ library manifest is stored at
 ## Launch options
 
 The button beside **Play** opens the game's launch options: the settings the iPhone
-launcher shows before a game starts ([docs/settings.md](https://github.com/seedds/nxnative/blob/806fabe19829080aab4606fd3bbd33628c7b0ff9/docs/settings.md)), read
+launcher shows before a game starts ([docs/settings.md](https://github.com/seedds/nxnative/blob/9ae4907a4d4d233eb7e8f78b14958ca607f055df/docs/settings.md)), read
 from the list the engine packs into the Mac app (`Contents/Resources/dm/launcher.json`,
 written by `dm/games/settings.py` from `dm/games/settings.tsv`, and the engine change that
 packs it is [seedds/nxnative#352](https://github.com/seedds/nxnative/pull/352), so a
@@ -474,10 +474,11 @@ A GUI app does not inherit the shell's PATH. On a machine where a terminal sees
 `.NET` and the Python packages just fine, a naive `which dotnet` and
 `/usr/bin/python3` check reports both missing. So the app looks where the tools
 actually are (`~/.dotnet`, `/usr/local/share/dotnet`, the Python framework
-installs), verifies `.NET` with `--list-sdks` (the extractor targets `net10.0`),
-and picks the first interpreter that can really import
+installs) and picks the first interpreter that can really import
 `lz4 capstone fontTools zbic backports.zstd`. That same interpreter then runs the
-build.
+build. Only S2Arm builds with .NET, so only its check runs `dotnet --list-sdks`, against the
+SDK version in the S2Arm tree's `compat/tree/global.json` (10 when there is none). nxnative's
+extractor and shader translator are native executables and need no .NET (#1404).
 
 The interpreters uv installs (`uv python install`) count as well: they live in
 `~/.local/share/uv/python` (or `UV_PYTHON_INSTALL_DIR`) with shims in

@@ -49,6 +49,17 @@ final class GameUpdateCatalogTests: XCTestCase {
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func engineShaderLibTool() throws -> String {
+        let toolURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("engine/dm/tools/shader_lib.py")
+        XCTAssertTrue(fm.fileExists(atPath: toolURL.path), "Expected synced engine shader_lib.py at \(toolURL.path)")
+        return toolURL.path
+    }
+
     private func makeMockRepo(chain: String = "a5e7fb6e4fa4") throws -> String {
         let repo = path("repo-\(UUID().uuidString)")
         let headerDir = repo + "/dm/gfx/nvn"
@@ -63,7 +74,8 @@ final class GameUpdateCatalogTests: XCTestCase {
         tid: String,
         chain: String = "a5e7fb6e4fa4",
         romfsIdentity: String = "DMROMFSID1 test size=1 index=1",
-        withMetalSources: Bool = false
+        withMetalSources: Bool = false,
+        inputsDigest: String = "deadbeef0001"
     ) throws {
         let seedDir = BuildSeedCache.seedDirectory(for: tid, seedRoot: seedRoot)
         try fm.createDirectory(atPath: seedDir + "/ExeFS", withIntermediateDirectories: true)
@@ -74,9 +86,17 @@ final class GameUpdateCatalogTests: XCTestCase {
             try fm.createDirectory(atPath: seedDir + "/metal-sources", withIntermediateDirectories: true)
         }
         try Data("bin".utf8).write(to: URL(fileURLWithPath: seedDir + "/ExeFS/main"))
-        try Data("c1".utf8).write(to: URL(fileURLWithPath: seedDir + "/shader/tables/c1_full.tsv"))
-        try Data("cb".utf8).write(to: URL(fileURLWithPath: seedDir + "/shader/tables/cb_extent.tsv"))
-        try Data("msl".utf8).write(to: URL(fileURLWithPath: seedDir + "/shader/ios/b-" + chain + ".img"))
+
+        let tableHeader = "# chain b-\(chain) inputs \(inputsDigest) fixture\n"
+        try Data(tableHeader.utf8).write(to: URL(fileURLWithPath: seedDir + "/shader/tables/c1_full.tsv"))
+        try Data(tableHeader.utf8).write(to: URL(fileURLWithPath: seedDir + "/shader/tables/cb_extent.tsv"))
+
+        let libDir = seedDir + "/shader/ios/b-" + chain
+        try fm.createDirectory(atPath: libDir, withIntermediateDirectories: true)
+        try Data("metallib".utf8).write(to: URL(fileURLWithPath: libDir + "/0000000000000001_b.metallib"))
+        let stamp = "game\t\(tid.lowercased())\ninputs\t\(inputsDigest)\n"
+        try Data(stamp.utf8).write(to: URL(fileURLWithPath: libDir + "/inputs.tsv"))
+        _ = try runPython(try engineShaderLibTool(), args: ["pack", libDir])
 
         let record = BuildSeedRecord(
             titleID: tid,
@@ -91,21 +111,31 @@ final class GameUpdateCatalogTests: XCTestCase {
     }
 
     func testCatalogVersionCountsDefaultsAndReleaseBaseStripping() {
-        XCTAssertEqual(GameUpdateCatalog.updatedVersions.count, 102)
+        XCTAssertEqual(GameUpdateCatalog.updatedVersions.count, 123)
         let grouped = Dictionary(grouping: GameUpdateCatalog.updatedVersions.values, by: { $0 }).mapValues(\.count)
-        XCTAssertEqual(grouped["1.5.0"], 80)
+        XCTAssertEqual(grouped["1.5.1"], 35)
+        XCTAssertEqual(grouped["1.5.0"], 66)
         XCTAssertEqual(grouped["1.4.0"], 16)
         XCTAssertEqual(grouped["1.3.0"], 6)
         XCTAssertNil(grouped["1.2.2"])
 
+        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "0400A3A01EE4C000"), "1.5.1")
+        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "0400C76024710000"), "1.5.1")
+        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "0400486024DEC000"), "1.5.1")
+        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "010099801C4FA000"), "1.5.1")
         XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "01007A2027548000"), "1.5.0")
-        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "0400C76024710000"), "1.5.0")
-        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "01001C8016B4E000"), "1.5.0")
+        XCTAssertEqual(GameUpdateCatalog.catalogVersion(for: "01001C8016B4E000"), "1.5.1")
         XCTAssertNil(GameUpdateCatalog.catalogVersion(for: tidUnlisted))
 
+        XCTAssertEqual(GameUpdateCatalog.releaseBaseVersion(" v1.5.1-local "), "1.5.1")
+        XCTAssertEqual(GameUpdateCatalog.releaseBaseVersion("1.5.1-rc1"), "1.5.1")
         XCTAssertEqual(GameUpdateCatalog.releaseBaseVersion(" v1.5.0-local "), "1.5.0")
         XCTAssertEqual(GameUpdateCatalog.releaseBaseVersion("1.5.0-rc2"), "1.5.0")
         XCTAssertEqual(GameUpdateCatalog.releaseBaseVersion("1.4.0"), "1.4.0")
+
+        let listed151 = GameUpdateCatalog.hasSpecificUpdate(titleID: "0400A3A01EE4C000", appVersion: "1.5.1-rc1", gitSpecificChanged: nil)
+        XCTAssertTrue(listed151.hasSpecific)
+        XCTAssertEqual(listed151.versionLabel, "1.5.1")
 
         let unlisted = GameUpdateCatalog.hasSpecificUpdate(titleID: tidUnlisted, appVersion: "1.5.0", gitSpecificChanged: nil)
         XCTAssertFalse(unlisted.hasSpecific)
@@ -189,7 +219,7 @@ final class GameUpdateCatalogTests: XCTestCase {
         let localImg = outDir + "/games/Sample Game/Sample Game.img"
         try fm.createDirectory(atPath: (localImg as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try Data("stub".utf8).write(to: URL(fileURLWithPath: localImg))
-        let pathBFast = GameUpdateCatalog.assess(
+        let pathBRebuildWithLocalImg = GameUpdateCatalog.assess(
             titleID: tidSpecific150,
             isMarkedOlder: true,
             hasMacBuild: false,
@@ -203,10 +233,13 @@ final class GameUpdateCatalogTests: XCTestCase {
             seedRoot: seedRoot,
             repoPath: repo
         )
-        XCTAssertEqual(pathBFast.heroState, .specificFast(version: "1.5.0"))
-        XCTAssertTrue(pathBFast.canFastRefreshIOS)
-        XCTAssertFalse(pathBFast.needsMissingImgGuideIOS)
-        XCTAssertFalse(pathBFast.missingOriginalPackage)
+        XCTAssertEqual(pathBRebuildWithLocalImg.heroState, .specificFull(version: "1.5.0"))
+        XCTAssertFalse(pathBRebuildWithLocalImg.canFastRefreshIOS)
+        XCTAssertTrue(pathBRebuildWithLocalImg.canSeedRefreshIOS)
+        XCTAssertTrue(pathBRebuildWithLocalImg.needsShaderRebuildIOS)
+        XCTAssertEqual(pathBRebuildWithLocalImg.shaderRebuildReasonIOS, .chainChanged)
+        XCTAssertFalse(pathBRebuildWithLocalImg.needsMissingImgGuideIOS)
+        XCTAssertFalse(pathBRebuildWithLocalImg.missingOriginalPackage)
 
         let generalFast = GameUpdateCatalog.assess(
             titleID: tidUnlisted,

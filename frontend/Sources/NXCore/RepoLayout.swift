@@ -36,10 +36,34 @@ package enum RepoLayout {
             let root = EngineLayout.root(dir)
             let prefix = root.hasSuffix("/") ? root : root + "/"
             return descriptor.requiredTools.filter { !fm.fileExists(atPath: prefix + $0) }
-        case .s2arm, .macNativeGames, .nxkit:
+        case .s2arm, .macNativeGames, .nxkit, .kidWithSword, .noLagKart:
             let prefix = dir.hasSuffix("/") ? dir : dir + "/"
             return descriptor.requiredTools.filter { !fm.fileExists(atPath: prefix + $0) }
         }
+    }
+
+    /// Whether the checkout's build script accepts `--progress` (JSON progress events).
+    package static func supportsProgressJson(_ dir: String) -> Bool {
+        let script = EngineLayout.root(dir) + "/" + buildScript
+        if !FileManager.default.fileExists(atPath: script), EngineLayout.hasEngineTool(dir) { return true }
+        guard let text = try? String(contentsOfFile: script, encoding: .utf8) else { return false }
+        return text.contains("'--progress'") || text.contains("\"--progress\"")
+    }
+
+    /// Whether the checkout's build script accepts `--bundle-id` for overriding the iOS app bundle identifier.
+    package static func supportsBundleID(_ dir: String) -> Bool {
+        let script = EngineLayout.root(dir) + "/" + buildScript
+        if !FileManager.default.fileExists(atPath: script), EngineLayout.hasEngineTool(dir) { return true }
+        guard let text = try? String(contentsOfFile: script, encoding: .utf8) else { return false }
+        return text.contains("'--bundle-id'") || text.contains("\"--bundle-id\"")
+    }
+
+    /// Whether the checkout's build script accepts `--env-file`.
+    package static func supportsEnvFile(_ dir: String) -> Bool {
+        let script = EngineLayout.root(dir) + "/" + buildScript
+        if !FileManager.default.fileExists(atPath: script), EngineLayout.hasEngineTool(dir) { return true }
+        guard let text = try? String(contentsOfFile: script, encoding: .utf8) else { return false }
+        return text.contains("'--env-file'") || text.contains("\"--env-file\"")
     }
 
     /// Whether the checkout's build script has this fork's `--work-dir` (issue #5): an upstream
@@ -73,10 +97,74 @@ package enum RepoLayout {
         return text.contains("'--from-seed'") || text.contains("\"--from-seed\"")
     }
 
+    /// Whether the checkout's `build_seed.py` supports `scan-uncompressed` and `compress-seeds`.
+    package static func supportsSeedCompression(_ dir: String) -> Bool {
+        let script = EngineLayout.root(dir) + "/" + buildSeedTool
+        guard let text = try? String(contentsOfFile: script, encoding: .utf8) else { return false }
+        return text.contains("scan-uncompressed") && text.contains("compress-seeds")
+    }
+
+    /// Whether the checkout's build script takes `--seen-shaders` (partial Mac shader builds from `shader_seen.tsv`).
+    package static func supportsSeenShaders(_ dir: String) -> Bool {
+        guard let text = try? String(contentsOfFile: EngineLayout.root(dir) + "/" + buildScript, encoding: .utf8) else { return false }
+        return text.contains("'--seen-shaders'") || text.contains("\"--seen-shaders\"")
+    }
+
     /// Whether the checkout's romfs tool takes `--extract-msl` (PR #3 shader trailer extraction).
     package static func supportsExtractMsl(_ dir: String) -> Bool {
         guard let text = try? String(contentsOfFile: EngineLayout.root(dir) + "/" + romfsImageTool, encoding: .utf8) else { return false }
         return text.contains("'--extract-msl'") || text.contains("\"--extract-msl\"")
+    }
+
+    /// Whether the checkout's build script takes `--cheat-dir` for offline iOS cheat trampoline baking.
+    package static func supportsCheatDir(_ dir: String) -> Bool {
+        guard let text = try? String(contentsOfFile: EngineLayout.root(dir) + "/" + buildScript, encoding: .utf8) else { return false }
+        return text.contains("'--cheat-dir'") || text.contains("\"--cheat-dir\"")
+    }
+
+    /// Default Mac cheats directory (`~/Library/Application Support/nxnative/<TID>/cheats`) when it holds at least one `.txt` cheat file.
+    package static func existingCheatsDir(
+        titleID: String,
+        explicit: String? = nil,
+        home: String = NSHomeDirectory(),
+        fm: FileManager = .default
+    ) -> String? {
+        if let explicit {
+            let trimmed = explicit.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, directoryHasCheatText(atPath: trimmed, titleID: titleID, fm: fm) {
+                return trimmed
+            }
+        }
+        let tid = titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !tid.isEmpty else { return nil }
+        let defaultDir = (home as NSString)
+            .appendingPathComponent("Library/Application Support/nxnative")
+            .appending("/\(tid)/cheats")
+        return directoryHasCheatText(atPath: defaultDir, titleID: tid, fm: fm) ? defaultDir : nil
+    }
+
+    private static func directoryHasCheatText(atPath path: String, titleID: String, fm: FileManager) -> Bool {
+        let tid = titleID.uppercased()
+        let dirs = [
+            path,
+            path + "/atmosphere/contents/\(tid)/cheats",
+            path + "/contents/\(tid)/cheats",
+        ]
+        for dir in dirs {
+            guard let names = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for name in names where name.count >= 20 && name.lowercased().hasSuffix(".txt") && name.prefix(16).allSatisfy(\.isHexDigit) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether the checkout's build script allows opt-in iOS `--seen-shaders` (`ios_seen_shaders` + `DM_PARTIAL_SHADERS`).
+    package static func supportsIOSSeenShaders(_ dir: String) -> Bool {
+        guard let text = try? String(contentsOfFile: EngineLayout.root(dir) + "/" + buildScript, encoding: .utf8) else { return false }
+        return (text.contains("'--seen-shaders'") || text.contains("\"--seen-shaders\""))
+            && text.contains("ios_seen_shaders")
+            && text.contains("DM_PARTIAL_SHADERS")
     }
 
     /// The checkout of this repository the app drives. A released .app ships on its own,

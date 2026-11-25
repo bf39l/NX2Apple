@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import NXCore
 import NXModel
@@ -12,15 +13,19 @@ import NXLauncher
     let completionDismissal = BuildCompletionDismissal()
     /// Records the builds in the library whichever view is up: console mode takes LauncherView down while a build runs on.
     let recorder: BuildRecorder
+    private var playedWatch: AnyCancellable?
     lazy var console: LiveConsoleDriver = {
         let driver = LiveConsoleDriver(library: library, controls: controls, repo: { [stores] in stores.repo.path }, lang: { [stores] in stores.localizer.lang },
                                        labels: { [stores] in stores.localizer.t($0) }, player: { [stores] in stores.players.active },
                                        saves: { [stores] in (stores.saveSettings.global, stores.saveSettings.game($0)) },
                                        sticks: { [stores] in stores.sticks.settings },
-                                       shellRoot: { [stores] in stores.build.shellCachePath })
+                                       shellRoot: { [stores] in stores.build.shellCachePath },
+                                       sessions: stores.playSessions)
         driver.bindActivity(stores.build)   // the top bar's chip shows the desktop's build (#1004)
         driver.bindBuilds(stores.build, queue: stores.queue)   // the Builds page (#816)
         driver.buildEngineID = { [stores] in stores.engineSync.selection.engineID }
+        driver.nxkitVersion = { [stores] in stores.build.nxkitRecord($0)?.version }
+        driver.mngSaveSettings = stores.saveSettings
         return driver
     }()
 
@@ -28,6 +33,9 @@ import NXLauncher
         self.stores = stores ?? LauncherStores()
         self.library = library ?? GameLibrary()
         recorder = BuildRecorder(stores: self.stores, library: self.library)
+        playedWatch = self.library.played.sink { [weak stores = self.stores] _ in
+            stores?.librarySelection.clearPin()
+        }
     }
 }
 

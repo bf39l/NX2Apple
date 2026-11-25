@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Wed, 25 Nov 2026 15:51:44 +1300
+Subject: [PATCH] gfx: align fork renderer extensions with current upstream
+ APIs
+
+Upstream-Status: fork-only
+Reason: Adapt retained renderer patches to current texture, presentation and scaler APIs
+Issue: local engine update to 9ae4907a
+
+---
+ dm/gfx/nvn/nvn_framegen.inc | 2 +-
+ dm/gfx/nvn/nvn_mtl.m        | 6 +++---
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/dm/gfx/nvn/nvn_framegen.inc b/dm/gfx/nvn/nvn_framegen.inc
+index 5352df9..42d838f 100644
+--- a/dm/gfx/nvn/nvn_framegen.inc
++++ b/dm/gfx/nvn/nvn_framegen.inc
+@@ -746,7 +746,7 @@ static int fg_service_owed(double tick_time, id<CAMetalDrawable> drawable, doubl
+         pthread_mutex_unlock(&g_pq_mu);
+         atomic_store_explicit(&g_fg_owing, 1, memory_order_relaxed);
+         uint64_t p0 = now_ns();
+-        @autoreleasepool { if (!atomic_load(&g_present_suspended)) present_now(&ow.t, 0, ow.frame, tk, ow.crop, ow.ev_val, drawable, target_ts); }
++        @autoreleasepool { if (!atomic_load(&g_present_suspended)) present_now(&ow.t, 0, ow.frame, tk, ow.crop, ow.ev_val, drawable, target_ts, 0); }
+         atomic_store_explicit(&g_fg_owing, 0, memory_order_relaxed);
+         atomic_fetch_sub(&g_link_presenting, 1);
+         if (atomic_load(&g_present_suspended)) {
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 3298309..cbb3b0c 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -4153,7 +4153,7 @@ static inline void tex_lsize(const tex_t *t, unsigned l, uint32_t *w, uint32_t *
+ // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
+ // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
+ // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
+-static void tex_zero_fill(id<MTLTexture> mt);
++static void tex_zero_fill(id<MTLTexture> mt, int bc_astc_tex);
+ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
+     id holder = tex_get(t->serial);
+     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
+@@ -4181,7 +4181,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
+     if (!reinterpret) res_add(upgraded);
+     id<MTLTexture> upgraded_view = nil;
+     int copy_src = !backing && fam_is_valid(base);
+-    if (!backing && !copy_src) tex_zero_fill(upgraded);
++    if (!backing && !copy_src) { uint32_t pf; tex_zero_fill(upgraded, bc_astc(t, &pf)); }
+     id<MTL4ComputeCommandEncoder> b = copy_src ? blit() : nil;   // shared backing already contains the pixels; copying it onto itself would overlap; an invalid compressed family member is zeroed instead
+     NSUInteger slices = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+     for (NSUInteger l = 0; copy_src && l < base.mipmapLevelCount; l++) {
+@@ -24105,7 +24105,7 @@ void dm_gfx_teardown(void) { @autoreleasepool {
+         res_remove(g_up_mfx[i].out);
+         g_up_mfx[i] = (up_mfx_scaler){0};
+     }
+-    g_up_mfx_next = 0; g_up_mfx_n = 0; g_up_mfx_kept = 0;
++    g_up_mfx_use = 0; g_up_mfx_n = 0; g_up_mfx_kept = 0;
+     g_up_mfx_straight[0] = g_up_mfx_straight[1] = 0;
+     g_up_mfx_mode = -1;
+     g_comp4 = nil; g_dlss_comp = nil; g_fx_comp = nil;

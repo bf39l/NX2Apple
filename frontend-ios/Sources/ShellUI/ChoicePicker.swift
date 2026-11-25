@@ -98,7 +98,7 @@ struct ChoicePickerView: View {
                     Text(request.row.label).shellType(ShellType.flowTitle(20)).lineLimit(2)
                         .accessibilityAddTraits(.isHeader).accessibilityIdentifier("choice.title")
                     if !request.row.note.isEmpty {
-                        Text(request.row.note).shellType(ShellType.note).foregroundStyle(.white.opacity(0.5)).lineLimit(2)
+                        Text(request.row.note).shellType(ShellType.note).foregroundStyle(.white.opacity(0.62)).lineLimit(2)
                     }
                 }
                 Spacer(minLength: 8)
@@ -171,9 +171,9 @@ struct ChoiceValueRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.label).shellType(ShellType.settingLabel).fixedSize(horizontal: false, vertical: true)
                     if !row.note.isEmpty {
-                        Text(row.note).shellType(ShellType.note).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
+                        Text(row.note).shellType(ShellType.note).foregroundStyle(.white.opacity(0.62)).fixedSize(horizontal: false, vertical: true)
                     }
-                    if row.fromShell { FromSettingsMark() }
+                    if row.fromEnvFile { FromEnvFileMark(rowID: row.id) } else if row.fromShell { FromSettingsMark() }
                 }
                 Spacer(minLength: 8)
                 Text(valueLabel).shellText(14.5, .semibold).foregroundStyle(ShellPalette.cream)

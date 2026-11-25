@@ -1,0 +1,85 @@
+From cbac7184f633de9b76b6f0c04d9aee9d3bc82abf Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Wed, 25 Nov 2026 15:47:38 +1300
+Subject: [PATCH] packing: allow unreadable files when shader tables match
+
+Upstream-Status: fork-only
+Reason: Preserve the tested fork support while using the current upstream engine.
+Issue: local Xenoblade Chronicles 3 build (010074F013262000)
+
+---
+ dm/games/010074F013262000/README.md    |  3 +++
+ dm/tools/tests/test_nsp_incremental.py | 14 ++++++++++++++
+ docs/reference/packing.md              |  8 ++++++++
+ scripts/build_ipa_from_nsp.py          |  2 +-
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/dm/games/010074F013262000/README.md b/dm/games/010074F013262000/README.md
+index ded1308..3013a13 100644
+--- a/dm/games/010074F013262000/README.md
++++ b/dm/games/010074F013262000/README.md
+@@ -221,4 +221,7 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
+ - [Cuts that only fit an iPhone's alias region](../../../docs/reference/memory.md#cuts-that-only-fit-an-iphones-alias-region): the Mac loader restores the six allocator cuts at load when the alias region is at least 64 GB.
+ - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
+ - [Block-compressed storage the CPU wrote before first use](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use): uncompressed 3D particle steering fields, taken from their storage too (GitHub issue #1011).
++
++- [Build anyway with matching shader tables](../../../docs/reference/packing.md#build-anyway-stops-on-an-unreadable-archive-despite-matching-shader-tables): an explicit damaged-package build still checks every registered shader table.
++
+ - [Default language from control data](../../../docs/reference/services.md#default-language-from-control-data): lists British English without American English; direct host runs without `DM_LANG` crashed 2.5 s into boot at `main+0x10141ac` (PR #3147).
+diff --git a/dm/tools/tests/test_nsp_incremental.py b/dm/tools/tests/test_nsp_incremental.py
+index 05e5b4b..a345aa8 100644
+--- a/dm/tools/tests/test_nsp_incremental.py
++++ b/dm/tools/tests/test_nsp_incremental.py
+@@ -961,6 +961,20 @@ class SplitShaders(Base):
+         for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))
+         with self.assertRaisesRegex(nsp.BuildError, r'^2 file\(s\) could not be read'): self.go(game.Game(self.src), own=False)
+ 
++    def test_allow_damaged_registered_split_still_requires_matching_tables(self):
++        self.log = '[RED] 1 file(s) could not be read (first: archive: bad compressed texture)\nshaders: 3 (3 vertex)\n'
++        for n in self.NAMES: (self.src / n).write_text(self.table(n))
++        g = game.Game(self.src)
++        with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):
++            self.go(g, own=False)
++            self.go(g, own=False)
++            self.assertEqual(self.splits, 1)
++            self.rows = 'missing shader'; (self.ex / 'RomFS/b.bin').write_bytes(b'changed')
++            with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'):
++                self.go(g, own=False)
++        with self.assertRaisesRegex(nsp.BuildError, r'^1 file\(s\) could not be read'):
++            self.go(g, own=False)
++
+     def test_mode_is_in_the_key(self):   # the same files split as an own profile, then checked against them as a registered one
+         g = self.own(); self.go(g)
+         self.assertEqual(self.go(g, own=False), nsp.package_key(self.pkg)); self.assertEqual(self.splits, 2)
+diff --git a/docs/reference/packing.md b/docs/reference/packing.md
+index e4765b1..d0d1494 100644
+--- a/docs/reference/packing.md
++++ b/docs/reference/packing.md
+@@ -855,3 +855,11 @@
+ - **Fix:** `uepak.py` tries 20-byte hashes first and switches to 8 only if the tables fail to parse with matching counts and consume the whole chunk. The version 2 archive stores each 8-byte hash with 12 zero bytes appended. Version 12 follows version 11's footer rules. For untagged Switch records, `raw_record` looks for a unique control section with matching code lengths and a `0x880`-byte control length. `shader_split.ue_shaders` takes the stage from the archive's frequency for those records.
+ - **Check:** `test_uepak_iostore.py` covers both hash widths, a wrong-width parse that reaches the chunk's end, valid and legacy-position version 12 footers, and untagged records with code or control length mismatches or a copy of the control magic inside shader code. The [PR author](https://github.com/seedds/nxnative/pull/3022) built 6,878 Mac shaders for update 131072.
+ - **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`).
++
++### Build anyway stops on an unreadable archive despite matching shader tables
++
++- **Symptom:** a registered game's extraction succeeds with `--allow-damaged`, but shader splitting stops with `file(s) could not be read; the profile's tables hold every file's shaders`, even when every generated shader table matches its registered table.
++- **Cause:** the shader step rejected unreadable archive data before comparing the tables, independently of the explicit extraction override. A corrupt non-shader resource can produce that warning without losing any required shader.
++- **Fix:** allow the explicit override past the unreadable-file guard, retaining the warning and all registered shader-table comparisons. Missing or changed shaders still stop the build, and a normal build still rejects unreadable files. This does not repair corrupted game assets.
++- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md), 2.2.1: `bf3.ard` failed its NCA integrity check and one zlib stream failed decompression, while all 27,055 shader keys and all generated profile tables matched.
++- **Check:** `test_nsp_incremental.py` covers matching tables, reuse, a mismatched table under the override and refusal without the override.
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index c0e88cc..b5dbb50 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -2865,7 +2865,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
+         text = (logs / 'shader_split.log').read_text(errors='replace')
+     m = re.search(r'shaders: (\d+) \(', text)
+     bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
+-    if bad and not provisional:   # the profile's tables were split from every file: one that does not read now is a reader change
++    if bad and not provisional and not ALLOW_DAMAGED:   # --allow-damaged still has to pass every registered shader-table comparison below
+         raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
+     if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
+     if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
+-- 
+2.56.1
+

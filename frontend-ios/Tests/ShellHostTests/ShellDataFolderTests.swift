@@ -402,7 +402,7 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
 @MainActor @Suite struct ShellDataFolderModelTests {
     private func model(_ box: Sandbox, picker: MutablePicker) -> ShellHostModel {
         ShellHostModel(config: box.config(), picker: picker,
-                       shellSettings: ShellSettingsStore(defaults: UserDefaults(suiteName: "t-shell-\(UUID().uuidString)")!))
+                       shellSettings: ShellSettingsStore(defaults: TestDefaults.make("t-shell")))
     }
 
     private func giveOrbitAnIdentity(in box: Sandbox) throws {
@@ -430,7 +430,7 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         try #require(bookmark.store(picked))
 
         let launcher = RecordingLauncher()
-        let settings = ShellSettingsStore(defaults: UserDefaults(suiteName: "t-shell-\(UUID().uuidString)")!)
+        let settings = ShellSettingsStore(defaults: TestDefaults.make("t-shell"))
         let model = ShellHostModel(config: box.config(), launcher: launcher, shellSettings: settings)
         await model.playNow(title)
         #expect(launcher.launched.last?.dataURL.resolvingSymlinksInPath() == picked.resolvingSymlinksInPath())
@@ -550,7 +550,7 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         #expect(host.details.first { $0.id == title }?.game.state == .playable)
     }
 
-    @Test func theScanFindsTheGameThenANewFolderDropsIt() async throws {
+    @Test func theScanFindsTheGameThenInvalidFolderIsRejectedAndClearDropsIt() async throws {
         let box = try Sandbox()
         try giveOrbitAnIdentity(in: box)
         let drive = box.root.appendingPathComponent("Drive", isDirectory: true)
@@ -558,6 +558,9 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         try ShellDataFolderTests.dmromfs(ShellDataFolderTests.indexA).write(to: drive.appendingPathComponent("Some name/romfs.img"))
         let empty = box.root.appendingPathComponent("Empty", isDirectory: true)
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        let otherAppDocs = box.root.appendingPathComponent("OtherAppDocuments", isDirectory: true)
+        try FileManager.default.createDirectory(at: otherAppDocs, withIntermediateDirectories: true)
+        try Data("hello".utf8).write(to: otherAppDocs.appendingPathComponent("notes.txt"))
 
         let picker = MutablePicker(drive)
         let m = model(box, picker: picker)
@@ -566,11 +569,26 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         var orbit = try #require(m.details.first { $0.id == Fixtures.orbit })
         #expect(orbit.game.state == .playable && orbit.dataFromShell)
         #expect(orbit.dataSource.hasSuffix("(from Settings)"))
+        #expect(m.notice == nil)
 
-        // A new folder: the old matches are gone and the new folder is scanned.
+        // Picking an empty folder or another app's documents folder must fail with a notice and keep the working folder.
         picker.url = empty
         await m.pickShellDataNow()
         await m.waitForDataChecks()
+        #expect(m.notice?.contains("Empty") == true)
+        orbit = try #require(m.details.first { $0.id == Fixtures.orbit })
+        #expect(orbit.game.state == .playable && orbit.dataFromShell && orbit.dataSource == "Some name (from Settings)")
+
+        m.notice = nil
+        picker.url = otherAppDocs
+        await m.pickShellDataNow()
+        await m.waitForDataChecks()
+        #expect(m.notice?.contains("OtherAppDocuments") == true)
+        orbit = try #require(m.details.first { $0.id == Fixtures.orbit })
+        #expect(orbit.game.state == .playable && orbit.dataFromShell && orbit.dataSource == "Some name (from Settings)")
+
+        // Clearing the shell data folder explicitly drops the matches.
+        m.actions.onClearShellData()
         orbit = try #require(m.details.first { $0.id == Fixtures.orbit })
         #expect(orbit.game.state == .needsGameData)
     }
@@ -579,7 +597,6 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         let box = try Sandbox()
         let fm = FileManager.default
         let hexTitle = "0100ABCDEF000000"
-        defer { UserDefaults().removePersistentDomain(forName: box.suite + hexTitle) }
         let oldDir = box.games.appendingPathComponent(Fixtures.orbit, isDirectory: true)
         let hexDir = box.games.appendingPathComponent(hexTitle, isDirectory: true)
         try fm.moveItem(at: oldDir, to: hexDir)
@@ -599,7 +616,7 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         try images.place(Data("dlc".utf8), at: titleFolder.appendingPathComponent("aoc/0.img"))
 
         let launcher = RecordingLauncher()
-        let settings = ShellSettingsStore(defaults: UserDefaults(suiteName: "t-shell-\(UUID().uuidString)")!)
+        let settings = ShellSettingsStore(defaults: TestDefaults.make("t-shell"))
         let picker = MutablePicker(drive)
         let host = ShellHostModel(config: box.config(), launcher: launcher, picker: picker, shellSettings: settings)
 
@@ -640,7 +657,6 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         let box = try Sandbox()
         let fm = FileManager.default
         let chainHex = "0100ABCDEF112233"
-        defer { UserDefaults().removePersistentDomain(forName: box.suite + chainHex) }
 
         // Give Orbit (indexA) and a second playable game (indexB) distinct identities of the same base size (61 B).
         try giveOrbitAnIdentity(in: box)
@@ -676,7 +692,7 @@ final class MutablePicker: FolderPicker, @unchecked Sendable {
         #expect(index.folder(matching: identA)?.resolvingSymlinksInPath().path == shared.resolvingSymlinksInPath().path)
 
         let launcher = RecordingLauncher()
-        let settings = ShellSettingsStore(defaults: UserDefaults(suiteName: "t-shell-\(UUID().uuidString)")!)
+        let settings = ShellSettingsStore(defaults: TestDefaults.make("t-shell"))
         let host = ShellHostModel(config: box.config(), launcher: launcher, picker: MutablePicker(shared), shellSettings: settings)
         await host.pickShellDataNow()
         await host.waitForDataChecks()

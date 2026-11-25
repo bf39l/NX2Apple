@@ -14,7 +14,10 @@ extension GameLibrary {
             }
         }
         if appExists {
-            if ipa.isEmpty { game.ipaPath = "" }
+            if ipa.isEmpty {
+                game.ipaPath = ""
+                game.ipaBuilds.removeValue(forKey: EngineUpstreamKind.nxnative.rawValue)
+            }
             game.iosAppPath = app
             if !device.isEmpty {
                 game.installedDevice = device
@@ -134,6 +137,21 @@ extension GameLibrary {
             }
         }
         if changed { save() }
+    }
+
+    /// Updates the ephemeral in-memory map of hot-loaded frameworks discovered on the currently connected iOS device.
+    func updateConnectedDeviceFrameworks(_ frameworks: [String: DeviceFrameworkEntry], deviceID: String) {
+        guard connectedDeviceFrameworks != frameworks || connectedDeviceID != deviceID else { return }
+        connectedDeviceFrameworks = frameworks
+        connectedDeviceID = deviceID
+        invalidateArtworkStates()
+    }
+
+    /// Returns the discovered framework entry on the active connected device for `titleID`, if present.
+    func connectedDeviceFramework(for titleID: String) -> DeviceFrameworkEntry? {
+        let tid = titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !tid.isEmpty else { return nil }
+        return connectedDeviceFrameworks[tid]
     }
 }
 

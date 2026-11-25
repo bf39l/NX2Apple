@@ -12,15 +12,18 @@ enum GallerySheet: String, CaseIterable {
     case removeGame
     case controllersSheet
     case controlsSheet, controlsDiscard
-    case cloudFetching, cloudFetchingLong, cloudChoose, cloudChosen, cloudUnreadable
+    case cloudFetching, cloudFetchingLong, cloudChoose, cloudChosen, cloudUnreadable, cloudSyncConflict
     case freeSpace, freeSpaceMeasuring, freeSpaceConfirm, buildFilesRemove
     case confirmUninstall, confirmEngineChannel, confirmStaleFrameworks, confirmBuildAnyway, confirmRemovePlayer
     case confirmCancelQueue, confirmCancelDraft, confirmTestedValues
     case rename, renameCustom, buildSelected, buildSelectedEmpty, supportedGames, supportedGamesExpanded
-    case batchRefresh, batchRefreshEmpty, imgGuide, imgGuideNoPackage
+    case batchRefresh, batchRefreshEmpty, imgGuide, imgGuideNoPackage, refreshCompletion
     case saves, saveImport
     case skippedItems, appUpdate, playerName, playerRename, buildSteps, sendSelectedDevice, shellCopy
     case cheats, invalidXcode
+    case activityLog, activityLogEmpty
+    case seedCompressionPrompt, seedCompressionProgress, seedCompressionDone, seedCompressionDonePartial, seedCompressionDoneStopped
+    case mngSaveMigration
 
     var title: String {
         switch self {
@@ -37,6 +40,7 @@ enum GallerySheet: String, CaseIterable {
         case .cloudChoose: return "Cloud save: choose"
         case .cloudChosen: return "Cloud save: one chosen"
         case .cloudUnreadable: return "Cloud save: unreadable"
+        case .cloudSyncConflict: return "Cloud sync: conflict"
         case .freeSpace: return "Free space"
         case .freeSpaceMeasuring: return "Free space: measuring"
         case .freeSpaceConfirm: return "Free space: confirm"
@@ -59,6 +63,7 @@ enum GallerySheet: String, CaseIterable {
         case .batchRefreshEmpty: return "Refresh games: nothing to refresh"
         case .imgGuide: return "Game data for iOS missing"
         case .imgGuideNoPackage: return "Game data for iOS missing: no package"
+        case .refreshCompletion: return "Refresh complete: per-game img status"
         case .saves: return "Saves: Mac and iPhone"
         case .saveImport: return "Import a save"
         case .skippedItems: return "Skipped files"
@@ -70,6 +75,14 @@ enum GallerySheet: String, CaseIterable {
         case .shellCopy: return "Copy game data: USB link speed"
         case .cheats: return "Cheats: no files yet"
         case .invalidXcode: return "Chosen app is not Xcode"
+        case .activityLog: return "Activity Log: a game open"
+        case .activityLogEmpty: return "Activity Log: no play history"
+        case .seedCompressionPrompt: return "Seed compression: prompt"
+        case .seedCompressionProgress: return "Seed compression: progress"
+        case .seedCompressionDone: return "Seed compression: completed"
+        case .seedCompressionDonePartial: return "Seed compression: partial"
+        case .seedCompressionDoneStopped: return "Seed compression: stopped"
+        case .mngSaveMigration: return "MNG shared save: migration"
         }
     }
 
@@ -83,6 +96,7 @@ enum GallerySheet: String, CaseIterable {
         case .saves: return CGSize(width: 600, height: 560)
         case .buildSteps: return CGSize(width: 600, height: 440)
         case .cheats: return CGSize(width: 600, height: 700)
+        case .activityLog: return CGSize(width: ActivityLogSheet.width, height: 780)
         case .sendSelectedDevice: return CGSize(width: 680, height: 720)
         default: return nil
         }
@@ -154,6 +168,19 @@ extension GalleryFixtures {
             return AnyView(CloudSaveSheet(gate: cloudGate(.asking(differ), titleID: game.titleID), picked: sheet == .cloudChosen ? .cloud : nil))
         case .cloudUnreadable:
             return AnyView(CloudSaveSheet(gate: cloudGate(.asking(unreadable), titleID: game.titleID)))
+        case .cloudSyncConflict:
+            let plan = CloudSaveNow.SyncPlan(
+                titleID: game.titleID,
+                gameName: name,
+                save: directory.appendingPathComponent("save"),
+                cloudFile: directory.appendingPathComponent("save.dmsync")
+            )
+            let prompt = CloudSaveSyncStore.ConflictPrompt(
+                plan: plan,
+                local: CloudSaveCheck.Save(hash: "a", saved: now.addingTimeInterval(-20 * 60)),
+                cloud: CloudSaveCheck.Save(hash: "b", saved: now.addingTimeInterval(-26 * 3600), device: "iPhone17,1")
+            )
+            return AnyView(CloudSyncConflictSheet(prompt: prompt, picked: .cloud, cancel: {}, choose: { _ in }))
         case .freeSpace:
             return AnyView(FreeSpaceView(m: stores.build, game: game, survey: survey(game), chosen: [.extracted, .oldShaders]))
         case .freeSpaceMeasuring:
@@ -187,9 +214,13 @@ extension GalleryFixtures {
             let source = sheet == .buildSelectedEmpty ? GameLibrary(file: directory.appendingPathComponent("empty-\(UUID().uuidString).json"), artwork: artworkFolder) : library
             return AnyView(BuildSelectedSheet(library: source, queue: stores.queue, engineID: stores.engineSync.selection.engineID, close: {}))
         case .supportedGames, .supportedGamesExpanded:
-            let supported = catalog.enumerated().map { index, entry in
+            var supported = catalog.enumerated().map { index, entry in
                 SupportedGame(titleID: entry.titleID, name: entry.name, edition: .switch1, version: index % 3 == 0 ? nil : "1.\(index).0",
                               notes: index == 0 ? "Runs at full speed. The first start compiles its shaders, which takes a few minutes." : "")
+            }
+            if !supported.contains(where: { $0.titleID.uppercased() == GalleryFixtures.mngTitleID.uppercased() }) {
+                supported.append(SupportedGame(titleID: GalleryFixtures.mngTitleID, name: "Harbor of Echoes", edition: .switch2, version: nil,
+                                               notes: "Supported by MacNativeGames for macOS native builds."))
             }
             return AnyView(SupportedGamesSheet(games: supported, owned: { id in library.games.first { $0.titleID.uppercased() == id.uppercased() } },
                                                covers: .saved(in: library.artworkDirectory, maxPixel: SupportedGamesSheet.coverPixels), showInLibrary: { _ in },
@@ -213,12 +244,24 @@ extension GalleryFixtures {
                                                    missingOriginalPackage: sheet == .imgGuideNoPackage)
             return AnyView(MissingImgGuideSheet(context: MissingImgGuideContext(game: game, assessment: assessment), stores: stores, devices: stores.deviceStore,
                                                 libraryFolder: library.folder, onResolvedImg: { _ in }, onFallbackFullRebuild: {}, close: {}))
+        case .refreshCompletion:
+            let summary = RefreshCompletionSummary(
+                isBatch: true,
+                items: [
+                    RefreshNoticeItem(titleID: "0100CD401DA32000", name: "Balatro", target: BuildTarget.ios, succeeded: true, imgStatus: .unchanged),
+                    RefreshNoticeItem(titleID: "0100E65002BB8000", name: "Stardew Valley", target: BuildTarget.ios, succeeded: true, imgStatus: .manualReplace(imgPath: "/Volumes/USB/games/Stardew Valley/Stardew Valley.img", reason: nil)),
+                ],
+                deviceName: "iPhone"
+            )
+            return AnyView(RefreshCompletionSheet(summary: summary, revealItem: { _ in }, onViewQueue: {}, close: {}))
         case .saves:   // no device is asked: a devicectl stand-in that answers nothing and the devices the launcher knows (none)
             return AnyView(SavesView(m: stores.build, library: library, gameID: game.id, devicectl: DeviceControl { _ in (false, "") },
                                      support: directory.appendingPathComponent("support", isDirectory: true), listDevices: { [] }))
         case .saveImport:
             return AnyView(SaveImportSheet(gameName: name, source: "/Users/Shared/Exports/\(game.name) save.zip",
                                            target: "/Volumes/Games/\(game.name)/save/\(game.titleID)", cancel: {}, confirm: {}))
+        case .activityLog, .activityLogEmpty:
+            return AnyView(activityLogSheet(empty: sheet == .activityLogEmpty, library: library))
         case .skippedItems:
             let items = [
                 SkippedLibraryItem(path: "/Volumes/Games/Update v3.nsp", name: "Update v3.nsp", rootPath: "/Volumes/Games", reason: .orphanSupplement(titleID: "0100000000990800")),
@@ -255,6 +298,164 @@ extension GalleryFixtures {
             return AnyView(DSSheet(title: t("xcodeChoice.invalid")) { EmptyView() } buttons: { DSSheetPrimaryButton(t("library.ok")) {} })
         case .confirmTestedValues:
             return confirm(t("launch.useTested"), subtitle: name, note: String(format: t("launch.useTestedMany"), 3), t("launch.useTested"), destructive: false)
+        case .seedCompressionPrompt, .seedCompressionProgress, .seedCompressionDone, .seedCompressionDonePartial, .seedCompressionDoneStopped:
+            return AnyView(seedCompressionGallerySheet(sheet, stores: stores, library: library))
+        case .mngSaveMigration:
+            let mngSource = directory.appendingPathComponent("MacNativeGames/TOTK/profile/save/53574e415449564578626c0000000001")
+            let nxTarget = directory.appendingPathComponent("Saves/0100F2C0115B6000")
+            let coordinator = MngSaveMigrationCoordinator(defaults: stores.defaults)
+            let now = Date(timeIntervalSince1970: 1_790_000_000)
+            coordinator.prompt = MngMigrationQuestion(
+                titleID: GalleryFixtures.mngTitleID,
+                gameName: name,
+                appPath: directory.appendingPathComponent("\(game.name).app").path,
+                assessment: .bothHaveSaves(
+                    mngSource: mngSource,
+                    nxTarget: nxTarget,
+                    nxExisting: nxTarget,
+                    mngFiles: 12,
+                    mngNewest: now.addingTimeInterval(-3600),
+                    nxFiles: 8,
+                    nxNewest: now.addingTimeInterval(-120)
+                )
+            )
+            return AnyView(MngSaveMigrationSheet(coordinator: coordinator, saveSettings: stores.saveSettings))
+        }
+    }
+}
+
+extension GalleryFixtures {
+    /// The Activity Log on a play history of the fixture's first three games and one removed game, over the two weeks before a
+    /// fixed day, the first game opened.
+    fileprivate func activityLogSheet(empty: Bool, library: GameLibrary) -> some View {
+        let store = PlaySessionStore(file: nil)
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let calendar = Calendar(identifier: .gregorian)
+        func play(_ id: String, _ title: String, _ days: [(Int, Double)]) {
+            for (ago, minutes) in days {
+                let start = calendar.date(byAdding: .day, value: -ago, to: now) ?? now
+                store.started(titleID: id, title: title, at: start, calendar: calendar)
+                store.ended(titleID: id, at: start.addingTimeInterval(minutes * 60))
+            }
+        }
+        let games = Array(library.games.prefix(3))
+        if !empty {
+            let plans: [[(Int, Double)]] = [
+                [(13, 65), (12, 80), (10, 95), (9, 50), (7, 110), (6, 75), (4, 120), (3, 60), (1, 105), (0, 100)],
+                [(11, 55), (8, 70), (5, 85), (2, 65), (1, 45)],
+                [(9, 40), (4, 35), (0, 50)],
+            ]
+            for (game, plan) in zip(games, plans) { play(game.titleID, game.displayName(lang), plan) }
+            play("0100AA0000090000", "Solaris Prime", [(13, 45), (6, 50), (40, 30)])
+        }
+        let folder = artworkFolder
+        return ActivityLogSheet(store: store, owned: { id in library.games.first { $0.titleID.uppercased() == id } },
+                                cover: { GameLibrary.artwork(for: $0, slot: .thumbnail, repo: "", banners: folder, maxPixel: ArtworkImages.cardPixels) },
+                                showInLibrary: { _ in }, now: now, initialExpandedID: games.first?.titleID.uppercased())
+    }
+
+    fileprivate func seedCompressionGallerySheet(_ sheet: GallerySheet, stores: LauncherStores, library: GameLibrary) -> some View {
+        let sampleGames = Array(library.games.prefix(6))
+        let scanGames: [SeedScanGame] = sampleGames.enumerated().map { idx, g in
+            let before = Int64((6 - idx) * 240_000_000)
+            return SeedScanGame(
+                titleID: g.titleID,
+                appName: g.name,
+                files: ["b-108c5f92c3c4.img"],
+                uncompressedBytes: before,
+                estimatedCompressedBytes: Int64(Double(before) * 0.08)
+            )
+        }
+        let totalBefore = scanGames.reduce(Int64(0)) { $0 + $1.uncompressedBytes }
+        let totalEstAfter = scanGames.reduce(Int64(0)) { $0 + $1.estimatedCompressedBytes }
+        switch sheet {
+        case .seedCompressionPrompt:
+            let scan = SeedScanResult(
+                seedRoot: "/Users/Shared/nxnative/build-seeds",
+                zstdAvailable: true,
+                totalGames: scanGames.count,
+                totalFiles: scanGames.count,
+                uncompressedBytes: totalBefore,
+                estimatedCompressedBytes: totalEstAfter,
+                estimatedSavedBytes: max(0, totalBefore - totalEstAfter),
+                games: scanGames
+            )
+            stores.seedCompression.setGalleryState(phase: .prompt(scan))
+        case .seedCompressionProgress:
+            let items: [SeedCompressionStore.ItemProgress] = scanGames.enumerated().map { idx, g in
+                let after = Int64(Double(g.uncompressedBytes) * 0.08)
+                switch idx {
+                case 0:
+                    return .init(titleID: g.titleID, appName: g.appName, beforeBytes: g.uncompressedBytes,
+                                 afterBytes: after, savedBytes: g.uncompressedBytes - after, filesCompressed: 1, status: .done)
+                case 1:
+                    return .init(titleID: g.titleID, appName: g.appName, beforeBytes: g.uncompressedBytes, status: .compressing)
+                case 2:
+                    return .init(titleID: g.titleID, appName: g.appName, beforeBytes: g.uncompressedBytes, status: .failed, error: "Insufficient disk space")
+                default:
+                    return .init(titleID: g.titleID, appName: g.appName, beforeBytes: g.uncompressedBytes, status: .waiting)
+                }
+            }
+            let done0 = items[0]
+            let running = SeedCompressionStore.RunningState(
+                totalGames: items.count,
+                totalBytes: totalBefore,
+                processedBytes: done0.beforeBytes + items[2].beforeBytes,
+                freedBytes: done0.savedBytes,
+                currentIndex: 2,
+                currentTitleID: items[1].titleID,
+                currentName: items[1].appName,
+                items: items,
+                stopping: false
+            )
+            stores.seedCompression.setGalleryState(phase: .running(running))
+        case .seedCompressionDone, .seedCompressionDonePartial, .seedCompressionDoneStopped:
+            let status: SeedCompressSummary.Status = sheet == .seedCompressionDone ? .completed
+                : (sheet == .seedCompressionDonePartial ? .partial : .stopped)
+            let count = sheet == .seedCompressionDoneStopped ? 2 : 4
+            let results: [SeedCompressItemResult] = scanGames.prefix(count).enumerated().map { idx, g in
+                if sheet == .seedCompressionDonePartial && idx == 2 {
+                    return SeedCompressItemResult(
+                        titleID: g.titleID,
+                        status: "error",
+                        beforeBytes: g.uncompressedBytes,
+                        afterBytes: g.uncompressedBytes,
+                        savedBytes: 0,
+                        filesCompressed: 0,
+                        error: "Verification mismatch"
+                    )
+                }
+                let after = Int64(Double(g.uncompressedBytes) * 0.08)
+                return SeedCompressItemResult(
+                    titleID: g.titleID,
+                    status: "completed",
+                    beforeBytes: g.uncompressedBytes,
+                    afterBytes: after,
+                    savedBytes: g.uncompressedBytes - after,
+                    filesCompressed: 1
+                )
+            }
+            let sumBefore = results.reduce(Int64(0)) { $0 + $1.beforeBytes }
+            let sumAfter = results.reduce(Int64(0)) { $0 + $1.afterBytes }
+            let completedCount = results.filter { $0.status == "completed" }.count
+            let failedCount = results.filter { $0.status == "error" }.count
+            let summary = SeedCompressSummary(
+                status: status,
+                completedGames: completedCount,
+                failedGames: failedCount,
+                beforeBytes: sumBefore,
+                afterBytes: sumAfter,
+                savedBytes: max(0, sumBefore - sumAfter),
+                elapsedSec: 12.4,
+                results: results
+            )
+            stores.seedCompression.setGalleryState(phase: .done(summary))
+        default:
+            break
+        }
+        let activeLang = self.lang
+        return SeedCompressionSheet(store: stores.seedCompression) { tid in
+            library.games.first { $0.titleID.uppercased() == tid }?.displayName(activeLang)
         }
     }
 }

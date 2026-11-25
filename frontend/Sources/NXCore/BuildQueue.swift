@@ -1,5 +1,15 @@
 import Foundation
 
+/// Per-entry RomFS `.img` shader update and device transfer outcome after a refresh/build finishes.
+package enum QueueEntryImgStatus: Codable, Equatable, Sendable {
+    /// No new `.img` or `DMMSLTR1` shader trailer was written (e.g. Mac target or fast refresh reusing unchanged shaders).
+    case unchanged
+    /// The updated `.img` (or `msl/` shader fallback) was transferred to the target device.
+    case transferred(imgName: String, deviceName: String)
+    /// An updated `.img` (or `msl/` fallback) was produced, but device transfer was skipped, unavailable, or failed.
+    case manualReplace(imgPath: String, reason: String?)
+}
+
 /// One entry of the build queue (LNPANDY/NX2Apple#943): a snapshot of what to build, taken when the player adds it. Nothing in it
 /// follows the Build form, the library or the engine selection afterwards, so the queue builds what was asked for.
 package struct QueueEntry: Codable, Identifiable, Equatable, Sendable {
@@ -32,14 +42,24 @@ package struct QueueEntry: Codable, Identifiable, Equatable, Sendable {
     package var reason: String?
     /// The name of the device or the folder it goes to, as chosen when it was added, nil for "This Mac" or an unsigned IPA.
     package var destinationName: String?
-    /// Whether this entry runs a seed-based fast refresh instead of unpacking original game packages.
+    /// Whether this entry runs a seed-based refresh (`--from-seed`) instead of unpacking original game packages.
     package var fastRefresh: Bool
+    /// Whether this seed-based refresh must rebuild shader libraries (slower than reusing cached shaders).
+    package var rebuildsShaders: Bool = false
     /// Whether `target` is pinned per entry (for mixed Mac + iPhone refresh batches) rather than overwritten by the Build page target.
     package var locksTarget: Bool
     /// Existing Mac `.app` path passed to fast refresh when updating a Mac bundle in place.
     package var existingAppPath: String?
     /// External or user-chosen `.img` path used for `--prefill-msl` and in-place trailer update without copying back locally.
     package var externalImgPath: String?
+    /// Snapshotted build engine chosen when enqueuing this entry; nil for legacy persisted queues.
+    package var upstream: EngineUpstreamKind? = nil
+    /// Snapshotted opt-in iOS `--seen-shaders` preference; nil follows the Build form switch.
+    package var iosSeenShaders: Bool? = nil
+    /// Snapshotted archive directory from the library so fast refresh finds the existing `.img` even when `outputDirectory` differs.
+    package var archivePath: String? = nil
+    /// Per-entry `.img` update and transfer disposition after completion.
+    package var imgStatus: QueueEntryImgStatus? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -60,9 +80,14 @@ package struct QueueEntry: Codable, Identifiable, Equatable, Sendable {
         case reason
         case destinationName
         case fastRefresh
+        case rebuildsShaders
         case locksTarget
         case existingAppPath
         case externalImgPath
+        case upstream
+        case iosSeenShaders
+        case archivePath
+        case imgStatus
     }
 
     package init(
@@ -83,9 +108,14 @@ package struct QueueEntry: Codable, Identifiable, Equatable, Sendable {
         reason: String? = nil,
         destinationName: String? = nil,
         fastRefresh: Bool = false,
+        rebuildsShaders: Bool = false,
         locksTarget: Bool = false,
         existingAppPath: String? = nil,
-        externalImgPath: String? = nil
+        externalImgPath: String? = nil,
+        upstream: EngineUpstreamKind? = nil,
+        iosSeenShaders: Bool? = nil,
+        archivePath: String? = nil,
+        imgStatus: QueueEntryImgStatus? = nil
     ) {
         self.id = id
         self.gameID = gameID
@@ -104,9 +134,14 @@ package struct QueueEntry: Codable, Identifiable, Equatable, Sendable {
         self.reason = reason
         self.destinationName = destinationName
         self.fastRefresh = fastRefresh
+        self.rebuildsShaders = rebuildsShaders
         self.locksTarget = locksTarget
         self.existingAppPath = existingAppPath
         self.externalImgPath = externalImgPath
+        self.upstream = upstream
+        self.iosSeenShaders = iosSeenShaders
+        self.archivePath = archivePath
+        self.imgStatus = imgStatus
     }
 
     package init(from decoder: Decoder) throws {
@@ -129,16 +164,21 @@ package struct QueueEntry: Codable, Identifiable, Equatable, Sendable {
         self.reason = try c.decodeIfPresent(String.self, forKey: .reason)
         self.destinationName = try c.decodeIfPresent(String.self, forKey: .destinationName)
         self.fastRefresh = try c.decodeIfPresent(Bool.self, forKey: .fastRefresh) ?? false
+        self.rebuildsShaders = try c.decodeIfPresent(Bool.self, forKey: .rebuildsShaders) ?? false
         self.locksTarget = try c.decodeIfPresent(Bool.self, forKey: .locksTarget) ?? false
         self.existingAppPath = try c.decodeIfPresent(String.self, forKey: .existingAppPath)
         self.externalImgPath = try c.decodeIfPresent(String.self, forKey: .externalImgPath)
+        self.upstream = try c.decodeIfPresent(EngineUpstreamKind.self, forKey: .upstream)
+        self.iosSeenShaders = try c.decodeIfPresent(Bool.self, forKey: .iosSeenShaders)
+        self.archivePath = try c.decodeIfPresent(String.self, forKey: .archivePath)
+        self.imgStatus = try c.decodeIfPresent(QueueEntryImgStatus.self, forKey: .imgStatus)
     }
 
     package var finished: Bool { status == .done || status == .failed || status == .skipped || status == .stopped }
 
     /// The inputs in one line: fast refresh when seeded, a game folder as such, else which rows have files ("Base game, Update, 2 DLC").
     package func inputSummary(_ t: (String) -> String) -> String {
-        if fastRefresh { return t("queue.fastRefreshSummary") }
+        if fastRefresh { return t(rebuildsShaders ? "queue.seedRebuildSummary" : "queue.fastRefreshSummary") }
         if gameFolder != nil { return t("queue.inputFolder") }
         var parts: [String] = []
         for (id, key) in [("base", "data.base"), ("update", "data.update"), ("dlc", "data.dlc")] {

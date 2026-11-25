@@ -337,6 +337,7 @@ package struct ShellInstaller {
     package var partSize: Int64 = ShellDataParts.partSize
     package var singleCopyLimit: Int64 = ShellDataParts.singleCopyLimit()
     package var signingIdentity: (String, ProcessRunner) -> String? = ShellHotInstall.defaultSigningIdentity
+    package var hotSigningIdentity: ((ShellHotInstall.HostBeacon, String, ProcessRunner) -> String?)? = nil
     package var codesignPath = "/usr/bin/codesign"
     /// Enabled by default; set `NX_DISABLE_HOT_INSTALL=1` to force full `xcodebuild` reinstalls.
     package var allowHotInstall = ProcessInfo.processInfo.environment["NX_DISABLE_HOT_INSTALL"] != "1"
@@ -366,10 +367,14 @@ package struct ShellInstaller {
         package var failure: BuildFailureKind? = nil
         /// Signed without the Increased Memory Limit, because the team's profile cannot carry it yet.
         package var noMemoryCapability = false
+        /// Per-game `.img` transfer dispositions produced by `installBatch` / `installBatchData`.
+        package var batchGameResults: [BatchGameResult] = []
+        /// True when full app install replaced an outdated shared shell detected on the device.
+        package var shellUpdated = false
 
-        package init(ok: Bool, message: String, step: BuildFailureClassifier.InstallStep? = nil, appPath: String = "", bundleID: String = "", copied: Int = 0, copySkipped: Bool = false, failure: BuildFailureKind? = nil, noMemoryCapability: Bool = false) {
+        package init(ok: Bool, message: String, step: BuildFailureClassifier.InstallStep? = nil, appPath: String = "", bundleID: String = "", copied: Int = 0, copySkipped: Bool = false, failure: BuildFailureKind? = nil, noMemoryCapability: Bool = false, shellUpdated: Bool = false) {
             self.ok = ok; self.message = message; self.step = step; self.appPath = appPath; self.bundleID = bundleID; self.copied = copied
-            self.copySkipped = copySkipped; self.failure = failure; self.noMemoryCapability = noMemoryCapability
+            self.copySkipped = copySkipped; self.failure = failure; self.noMemoryCapability = noMemoryCapability; self.shellUpdated = shellUpdated
         }
     }
 
@@ -435,12 +440,19 @@ package struct ShellInstaller {
     }
 
     /// Steps 3 to 6: prepare the shared app's library and project, sign it, and install the app bundle on the device.
-    func signAndInstallApp(framework: String, titleID: String, name: String) -> (outcome: Outcome, notes: [String]) {
+    func signAndInstallApp(framework: String, titleID: String, name: String,
+                           allowHotRetry: Bool = true, priorShellOutdated: Bool = false) -> (outcome: Outcome, notes: [String]) {
         guard FileManager.default.fileExists(atPath: framework) else {
             return (missingFramework(framework, name: name), [])
         }
-        if let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
-            return hot
+        var shellOutdated = priorShellOutdated
+        if allowHotRetry {
+            switch attemptHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
+            case .completed(let outcome, let notes):
+                return (outcome, notes)
+            case .fallback(let outdated):
+                shellOutdated = shellOutdated || outdated
+            }
         }
         // A device this Mac never paired is found out now, not after the signing: nothing is built for it
         if let refused = pairingRefusal() { return (refused, []) }
@@ -481,6 +493,10 @@ package struct ShellInstaller {
             }
         }
         if built.status != 0 {
+            if let devModeLine = BuildFailureClassifier.developerModeLine(in: built.output, deviceID: device) {
+                end(Self.signStageID, signName, ok: false, detail: devModeLine)
+                return (Outcome(ok: false, message: fmt("dev.signFailed", devModeLine), step: .sign, failure: .developerMode), [])
+            }
             if BuildFailureClassifier.appIDLimitReached(built.output) {
                 let line = built.output.split(whereSeparator: \.isNewline)
                     .map(String.init)
@@ -520,16 +536,23 @@ package struct ShellInstaller {
         let installed = run(ShellInstall.installCommand(xcrun: xcrun, device: device, app: app), env: nil, label: installName,
                             stageID: Self.installStageID, step: BuildProgress.installStep)
         if installed.status != 0 {
-            let why = installed.lastError ?? fmt("msg.exitCode", installed.status)
+            let devModeLine = BuildFailureClassifier.developerModeLine(in: installed.output, deviceID: device)
+            let why = devModeLine ?? installed.lastError ?? fmt("msg.exitCode", installed.status)
             end(Self.installStageID, installName, ok: false, detail: why)
-            return (Outcome(ok: false, message: fmt("dev.installFailed", why), step: .install), [])
+            return (Outcome(ok: false, message: fmt("dev.installFailed", why), step: .install,
+                            failure: devModeLine == nil ? nil : .developerMode), [])
         }
         ShellLibrary.recordInstalled(root: root, device: device)
         end(Self.installStageID, installName, ok: true)
 
         var outcome = Outcome(ok: true, message: fmt("dev.installed", deviceName), appPath: app, bundleID: bundleID)
         outcome.noMemoryCapability = noMemoryCapability
-        return (outcome, prepared.notes)
+        outcome.shellUpdated = shellOutdated
+        var notes = prepared.notes
+        if shellOutdated {
+            notes.append(fmt("shell.updatedShell", deviceName))
+        }
+        return (outcome, notes)
     }
 
     /// Step 7 on its own, for a Retry after a copy that failed midway: the listing, the diff and the copy, nothing else. The app

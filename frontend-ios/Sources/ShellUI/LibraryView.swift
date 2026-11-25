@@ -37,6 +37,7 @@ enum ShellLayout: Equatable {
 /// All game effects are supplied by the host through actions.
 public struct LibraryView: View {
     public let games: [GameDetail]
+    public let activityLog: ActivityLogSnapshot
     public let controllers: [ControllerInfo]
     public let globalPadMap: PadMap
     public let padMerge: Bool
@@ -45,6 +46,11 @@ public struct LibraryView: View {
     public let signingWarning: SigningWarning?
     public let sideloadCertificate: SideloadCertificateSummary?
     public let canOpenHomeButtonSettings: Bool
+    public let notice: String?
+    public let noticeTitle: String
+    public let noticeDismissTitle: String
+    public var onDismissNotice: () -> Void
+    public var onModalPresentedChange: ((Bool) -> Void)?
     public var onDismissSigningWarning: () -> Void
     public var actions: ShellActions
     public var input: ShellInputLog
@@ -57,6 +63,7 @@ public struct LibraryView: View {
     /// Counts the opening and closing of the settings pane, so a wait for one opening does not act on a later one.
     @State var settingsOpenings = 0
     @State var shellSettingsOpen: Bool
+    @State var activityLogOpen: Bool
     @State var controllersOpen: Bool
     /// The game whose How to fix or How to update explanation is open.
     @State var helpGameID: String?
@@ -65,6 +72,8 @@ public struct LibraryView: View {
     @State var restoreBackupLabel = ""
     /// The game whose Add to Home Screen guide is open.
     @State var homeScreenGameID: String?
+    /// The game whose Cheats center sheet is open.
+    @State var cheatsGameID: String?
     /// The game currently picking or cropping a custom 16:9 cover.
     @State var coverPickerGameID: String?
     @State var coverPickerPresented = false
@@ -85,6 +94,8 @@ public struct LibraryView: View {
     @State var buttonTestOpen: Bool
     /// The touch controls' layout editor, while open (over the shell settings).
     @State var touchLayout: TouchLayoutEditorModel?
+    /// True while a child modal inside the menu sheet (such as the certificate password sheet) is presented.
+    @State var childModalPresented = false
     @State var focus: FocusAppearance
     @State var focusRefresh = 0
     @State var targets = FocusTargetBuffer()
@@ -113,9 +124,14 @@ public struct LibraryView: View {
                 signingWarning: SigningWarning? = nil, onDismissSigningWarning: @escaping () -> Void = {},
                 sideloadCertificate: SideloadCertificateSummary? = nil,
                 initialPadMapping: String? = nil, initialButtonTestOpen: Bool = false,
-                canOpenHomeButtonSettings: Bool = false) {
+                canOpenHomeButtonSettings: Bool = false,
+                notice: String? = nil, noticeTitle: String = "NX2Apple", noticeDismissTitle: String = "OK",
+                onDismissNotice: @escaping () -> Void = {},
+                onModalPresentedChange: ((Bool) -> Void)? = nil,
+                activityLog: ActivityLogSnapshot = .empty, initialActivityLogOpen: Bool = false) {
         ShellPalette.configureNativeAppearance()
         self.games = games
+        self.activityLog = activityLog
         self.controllers = controllers
         self.globalPadMap = globalPadMap
         self.padMerge = padMerge
@@ -123,6 +139,11 @@ public struct LibraryView: View {
         self.signingWarning = signingWarning
         self.sideloadCertificate = sideloadCertificate
         self.canOpenHomeButtonSettings = canOpenHomeButtonSettings
+        self.notice = notice
+        self.noticeTitle = noticeTitle
+        self.noticeDismissTitle = noticeDismissTitle
+        self.onDismissNotice = onDismissNotice
+        self.onModalPresentedChange = onModalPresentedChange
         self.onDismissSigningWarning = onDismissSigningWarning
         _padMapping = State(initialValue: initialPadMapping.map { PadMappingState(gameID: $0) })
         _buttonTestOpen = State(initialValue: initialButtonTestOpen)
@@ -135,6 +156,7 @@ public struct LibraryView: View {
         _settingsArrived = State(initialValue: initialDetailOpen)
         _controllersOpen = State(initialValue: initialControllersOpen)
         _shellSettingsOpen = State(initialValue: initialShellSettingsOpen)
+        _activityLogOpen = State(initialValue: initialActivityLogOpen)
         _focus = State(initialValue: FocusAppearance(id: initialFocusVisible ? "lib.tile.\(first ?? "")" : nil, visible: initialFocusVisible))
         _touchMode = State(initialValue: !initialFocusVisible)
     }
@@ -174,7 +196,7 @@ public struct LibraryView: View {
             ZStack(alignment: .topLeading) {
                 if layout.isCoverFlow, let selected { CoverFlowBackdrop(game: selected.game) } else { ShellPalette.background.ignoresSafeArea() }
                 if games.isEmpty {
-                    EmptyLibraryView()
+                    EmptyLibraryView(onOpenSettings: openShellSettings)
                 } else if let selected {
                     library(selected, layout: layout, size: geometry.size, insets: insets)
                         .frame(width: width, height: geometry.size.height)
@@ -212,15 +234,25 @@ public struct LibraryView: View {
                     }
                     #endif
                     .presentationSizing(LauncherMenuSizing(mapping: padMapping != nil))
-                    // shortcut: cap tabletop sheets until the runtime keeps large detents clear of the fold.
-                    .presentationDetents(horizontalDivision ? [.medium] : [.large])
+                    .presentationDetents(horizontalDivision ? [.medium, .large] : [.large])
                     .presentationCompactAdaptation(divisionAxis == nil ? .automatic : .sheet)
                     .presentationDragIndicator(.visible)
                     .presentationBackground(ShellPalette.background)
                     .presentationContentInteraction(touchLayout != nil ? .scrolls : .automatic)
                     .interactiveDismissDisabled(touchLayout != nil)
-                    .modifier(MenuPlacement(divided: divisionAxis == .vertical, secondary: controllersOpen || shellSettingsOpen))
-                    .modifier(ShellKeyboardNavigation(active: touchLayout == nil && padMapping?.row == nil && coverCropInSheetSession == nil) { handle($0, from: .keyboard) })
+                    .modifier(MenuPlacement(divided: divisionAxis == .vertical, secondary: controllersOpen || shellSettingsOpen || activityLogOpen))
+                    .alert(
+                        Text(verbatim: noticeTitle),
+                        isPresented: Binding(
+                            get: { menuShowsNotice },
+                            set: { if !$0 { onDismissNotice() } }
+                        )
+                    ) {
+                        Button(noticeDismissTitle) { onDismissNotice() }
+                    } message: {
+                        Text(notice ?? "")
+                    }
+                    .modifier(ShellKeyboardNavigation(active: touchLayout == nil && padMapping?.row == nil && coverCropInSheetSession == nil && !childModalPresented && !menuShowsNotice) { handle($0, from: .keyboard) })
             }
 
             .environment(\.shellOpenTouchLayout, { openTouchLayout(whole, insets) })
@@ -240,9 +272,11 @@ public struct LibraryView: View {
         .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: settingsOpen)
         .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: controllersOpen)
         .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: shellSettingsOpen)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: activityLogOpen)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: helpGameID)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: restoreBackupGameID)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: homeScreenGameID)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: cheatsGameID)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: deleteGameID)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: choice)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: padMapping)
@@ -255,6 +289,7 @@ public struct LibraryView: View {
         .environment(\.shellShowHelp, { game in openHelp(game.id) })
         .environment(\.shellAskRestoreBackup, { game, label in openRestoreBackup(game.id, label: label) })
         .environment(\.shellAskHomeScreen, actions.supportsHomeScreen ? { game in openHomeScreen(game.id) } : nil)
+        .environment(\.shellOpenCheats, actions.supportsCheats ? { game in openCheats(game.id) } : nil)
         .environment(\.shellAskChangeCover, actions.supportsCustomCover ? { game in openCoverPicker(game.id) } : nil)
         .environment(\.shellAskDelete, { game in openDelete(game.id) })
         #if canImport(PhotosUI)
@@ -289,8 +324,14 @@ public struct LibraryView: View {
             inputSeen = log.last
         }
         .onAnyTouch { gate.touch() }
-        .modifier(ShellKeyboardNavigation(active: !menuPresented && activeCoverCrop == nil) { handle($0, from: .keyboard) })
-        .onAppear { focusRefresh &+= 1 }
+        .modifier(ShellKeyboardNavigation(active: !menuPresented && activeCoverCrop == nil && notice == nil) { handle($0, from: .keyboard) })
+        .onAppear {
+            focusRefresh &+= 1
+            onModalPresentedChange?(libraryModalPresented)
+        }
+        .onChange(of: libraryModalPresented) { _, presented in
+            onModalPresentedChange?(presented)
+        }
         .onDisappear { targets.values.removeAll(); targets.libraryValues.removeAll() }
         .onChange(of: settingsOpen) { _, open in
             settingsArrived = false
@@ -313,8 +354,29 @@ public struct LibraryView: View {
     }
 
     var menuPresented: Bool {
-        touchLayout != nil || settingsOpen || controllersOpen || shellSettingsOpen || helpGameID != nil
+        touchLayout != nil || settingsOpen || controllersOpen || shellSettingsOpen || activityLogOpen || cheatsGameID != nil || helpGameID != nil
             || restoreBackupGameID != nil || homeScreenGameID != nil || deleteGameID != nil || choice != nil || padMapping != nil || buttonTestOpen
+    }
+
+    var libraryModalPresented: Bool {
+        menuPresented || activeCoverCrop != nil
+    }
+
+    var activeNoticeHost: ShellNoticeHost {
+        ShellNoticeHost.resolve(
+            menuSheetPresented: menuPresented,
+            coverCropPresented: activeCoverCrop != nil,
+            touchEditorPresented: touchLayout != nil,
+            hostSheetPresented: false
+        )
+    }
+
+    var menuShowsNotice: Bool {
+        notice != nil && activeNoticeHost == .menuSheet && !childModalPresented
+    }
+
+    var coverCropShowsNotice: Bool {
+        notice != nil && activeNoticeHost == .coverCrop
     }
 
     // Host-owned alerts and sheets must wait until the menu presentation finishes closing.
@@ -349,158 +411,15 @@ public struct LibraryView: View {
         helpGameID = nil
         restoreBackupGameID = nil
         homeScreenGameID = nil
+        cheatsGameID = nil
         deleteGameID = nil
-        let leaving: PanelRetention.Panel? = controllersOpen ? .controllers : shellSettingsOpen ? .shellSettings : nil
+        let leaving: PanelRetention.Panel? = activityLogOpen ? .activityLog : controllersOpen ? .controllers : shellSettingsOpen ? .shellSettings : nil
+        activityLogOpen = false
         controllersOpen = false
         shellSettingsOpen = false
         settingsOpen = false
         if let leaving { retention.closed(leaving, sheetStaysOpen: false) }
         focus.id = "lib.tile.\(selected?.id ?? "")"
-    }
-
-    var menuSheet: some View {
-        NavigationStack {
-            menuContent.toolbar { if touchLayout == nil { launcherToolbar } }
-                .accessibilityHidden(touchLayout != nil)
-                .navigationDestination(isPresented: Binding(get: { padMapping != nil }, set: { if !$0 { closePadMapping() } })) {
-                    if let mapping = padMapping {
-                        PadMappingCard(title: padMappingTitle(mapping.gameID), rows: padMappingRows(mapping.gameID),
-                                       inherited: mapping.gameID == ControllersView.mappingID ? nil : globalPadMap, openRow: mapping.row,
-                                       open: openPadRow, pick: pickPadValue, backToList: closePadRow, reset: resetPadMapping, close: closePadMapping,
-                                       onChoiceTargets: { targets.values = visibleTargets($0) },
-                                       onChoiceInput: { handle($0, from: .keyboard) })
-                            .navigationTitle(ShellStrings.text("Button mapping"))
-                            #if os(iOS)
-                            .navigationBarTitleDisplayMode(.inline)
-                            #endif
-                            .navigationBarBackButtonHidden()
-                            .toolbar { launcherToolbar }
-                            .onPreferenceChange(FocusTargets.self) { if padMapping?.row == nil { targets.values = visibleTargets($0) } }
-                    }
-                }
-                .navigationDestination(isPresented: Binding(get: { buttonTestOpen }, set: { if !$0 { closeButtonTest() } })) {
-                    ButtonTestView(snapshot: padSnapshot, close: closeButtonTest)
-                        .navigationTitle(ShellStrings.text("Button test"))
-                        #if os(iOS)
-                        .navigationBarTitleDisplayMode(.inline)
-                        #endif
-                        .navigationBarBackButtonHidden()
-                        .toolbar { launcherToolbar }
-                        .onPreferenceChange(FocusTargets.self) { targets.values = visibleTargets($0) }
-                }
-        }
-        .background {
-            if settingsOpen, let selected { CoverFlowBackdrop(game: selected.game) }
-        }
-        #if os(iOS)
-        .toolbarBackground(settingsOpen ? .hidden : .automatic, for: .navigationBar)
-        #endif
-    }
-
-    func editorPage(_ model: TouchLayoutEditorModel) -> some View {
-        TouchLayoutEditorView(model: model, close: confirmTouchLayout, cancel: closeTouchLayout)
-            .ignoresSafeArea(.container)
-            #if os(iOS)
-            .statusBarHidden(true)
-            .persistentSystemOverlays(.hidden)
-            #endif
-            .coordinateSpace(name: "shell")
-            .environment(\.shellNativeBars, true)
-            .environment(\.shellFocus, focus)
-        .environment(\.shellFocusRefresh, focusRefresh)
-            .environment(\.shellIgnoresPress, { [gate] in gate.isSystemEcho })
-            .onPreferenceChange(FocusTargets.self) { targets.values = visibleTargets($0) }
-            .tint(ShellPalette.cream)
-            .preferredColorScheme(.dark)
-            .interactiveDismissDisabled()
-            .modifier(ShellKeyboardNavigation(active: true) { handle($0, from: .keyboard) })
-    }
-
-    var menuContent: some View {
-        GeometryReader { geometry in
-            ZStack {
-                if settingsOpen, let selected {
-                    settingsPane(selected, width: geometry.size.width)
-                        .accessibilityHidden(controllersOpen || shellSettingsOpen || choice != nil || padMapping != nil || helpGameID != nil || restoreBackupGameID != nil || homeScreenGameID != nil || deleteGameID != nil)
-                }
-                if retention.draws(.controllers, open: controllersOpen) {
-                    ControllersView(controllers: controllers, onBack: back, padMap: globalPadMap,
-                                    padMerge: padMerge, onPadMergeChange: menuActions.onPadMergeChange,
-                                    canOpenHomeButtonSettings: canOpenHomeButtonSettings,
-                                    onOpenHomeButtonSettings: menuActions.onOpenHomeButtonSettings)
-                        .background(ShellPalette.background)
-                        .accessibilityHidden(choice != nil || padMapping != nil || buttonTestOpen || retention.isLeaving(.controllers, open: controllersOpen))
-                        .allowsHitTesting(!retention.isLeaving(.controllers, open: controllersOpen))
-                }
-                if retention.draws(.shellSettings, open: shellSettingsOpen) {
-                    ShellSettingsView(actions: menuActions, sideloadCertificate: sideloadCertificate, onClose: closeShellSettings)
-                        .background(ShellPalette.background)
-                        .accessibilityHidden(choice != nil || retention.isLeaving(.shellSettings, open: shellSettingsOpen))
-                        .allowsHitTesting(!retention.isLeaving(.shellSettings, open: shellSettingsOpen))
-                }
-                if let id = helpGameID, let game = games.first(where: { $0.id == id })?.game {
-                    ScrollView { StateHelpView(game: game, actions: menuActions, onClose: closeHelp).padding(24) }
-                        .background(ShellPalette.background)
-                }
-                if let id = restoreBackupGameID, let game = games.first(where: { $0.id == id })?.game {
-                    ScrollView {
-                        RestoreSaveBackupView(game: game, backup: restoreBackupLabel,
-                                              restore: { confirmRestoreBackup(id) }, cancel: closeRestoreBackup)
-                    }
-                    .background(ShellPalette.background)
-                }
-                if let id = homeScreenGameID, let game = games.first(where: { $0.id == id })?.game {
-                    ScrollView {
-                        AddToHomeScreenView(
-                            game: game,
-                            supportsFloatingGuide: guardedActions.onAddToHomeScreenWithGuide != nil,
-                            prepareFloatingGuide: { guardedActions.onPrepareHomeScreenGuide?(id) },
-                            cancelPreparedFloatingGuide: { guardedActions.onCancelPreparedHomeScreenGuide?() },
-                            saveAndOpen: { floatingGuide in
-                                if let withGuide = guardedActions.onAddToHomeScreenWithGuide {
-                                    return await withGuide(id, floatingGuide)
-                                }
-                                return await guardedActions.onAddToHomeScreen?(id) ?? false
-                            },
-                            copyURL: { guardedActions.onCopyShortcutURL?(id) },
-                            close: closeHomeScreen
-                        )
-                    }
-                    .background(ShellPalette.background)
-                }
-                if let id = deleteGameID, let game = games.first(where: { $0.id == id })?.game {
-                    ScrollView { DeleteGameView(game: game, saves: $deleteSaves, delete: { confirmDelete(id) }, cancel: closeDelete) }
-                        .background(ShellPalette.background)
-                }
-                if let choice {
-                    ChoicePickerView(request: choice, pick: pickChoice, close: closeChoice)
-                        .padding(16).frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(ShellPalette.background)
-                }
-
-            }
-            .onPreferenceChange(FocusTargets.self) { all in
-                if touchLayout == nil { targets.values = visibleTargets(all).filter { $0.frame.width > 1 } }
-            }
-
-        }
-        .navigationTitle(menuTitle)
-        .navigationSubtitle(tabletopSettings ? ShellStrings.text("Game settings").uppercased() : "")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-    }
-
-    var tabletopSettings: Bool {
-        horizontalDivision && settingsOpen && !controllersOpen && !shellSettingsOpen && choice == nil
-            && padMapping == nil && !buttonTestOpen && helpGameID == nil && restoreBackupGameID == nil && homeScreenGameID == nil && deleteGameID == nil
-    }
-
-    var menuTitle: String {
-        guard choice == nil, padMapping == nil, !buttonTestOpen, helpGameID == nil, restoreBackupGameID == nil, homeScreenGameID == nil, deleteGameID == nil else { return "" }
-        if controllersOpen { return ShellStrings.text("Controllers") }
-        if shellSettingsOpen { return ShellStrings.text("Settings") }
-        return settingsOpen && (horizontalDivision || !settingsHeroVisible) ? selected?.game.title ?? "" : ""
     }
 
     @ViewBuilder func library(_ selected: GameDetail, layout: ShellLayout, size: CGSize, insets: EdgeInsets) -> some View {
@@ -555,8 +474,8 @@ public struct LibraryView: View {
                 .onChange(of: focus.id) { _, id in
                     guard let id, id.hasPrefix("set.") else { return }
                     withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                        if id == "set.back" { settingsPosition.scrollTo(edge: .top) }
-                        else { proxy.scrollTo(id, anchor: .center) }
+                        if id == "set.back" || id == "set.play" { settingsPosition.scrollTo(edge: .top) }
+                        else { proxy.scrollTo(GameDetailView.scrollRowID(for: id), anchor: .center) }
                     }
                 }
             }
@@ -574,21 +493,21 @@ public struct LibraryView: View {
     }
 
     // The navigation container owns these bars so UIKit can share the Duo rail with system UI.
-    @ToolbarContentBuilder var launcherToolbar: some ToolbarContent {
+    @ToolbarContentBuilder var rootLauncherToolbar: some ToolbarContent {
+        let items = rootMenuToolbarActions
         ToolbarItemGroup(placement: .cancellationAction) {
-            ForEach(toolbarActions.filter { $0.placement == .close }) { item in
+            ForEach(items.filter { $0.placement == .close }) { item in
                 toolbarButton(ShellStrings.text(item.title), item.symbol, item.id, item.target, item.action)
             }
         }
         ToolbarItemGroup(placement: donePlacement) {
-            ForEach(toolbarActions.filter { $0.placement == .done }) { item in
+            ForEach(items.filter { $0.placement == .done }) { item in
                 toolbarButton(ShellStrings.text(item.title), item.symbol, item.id, item.target, item.action)
                     .disabled(item.id == "touchLayout.done" && touchLayout?.invalidPlacement == true)
                     .buttonStyle(.borderedProminent).tint(ShellPalette.cream).foregroundStyle(.black)
             }
         }
-        if settingsOpen, helpGameID == nil, restoreBackupGameID == nil, homeScreenGameID == nil, deleteGameID == nil, choice == nil, padMapping == nil,
-           !controllersOpen, !shellSettingsOpen, let selected {
+        if settingsOpen, !controllersOpen, !shellSettingsOpen, !activityLogOpen, let selected {
             ToolbarItem(placement: .primaryAction) {
                 toolbarButton(selected.game.state.actionTitle, selected.game.state.actionSymbol, "state.action", "set.play") { primary(selected, fromSettings: true) }
                     .labelStyle(.iconOnly)
@@ -596,6 +515,15 @@ public struct LibraryView: View {
                     .tint(ShellPalette.cream)
                     .foregroundStyle(.black)
                     .disabled(selected.game.state.isJoining)
+            }
+        }
+    }
+
+    @ToolbarContentBuilder func secondaryLauncherToolbar(for route: MenuSecondaryRoute) -> some ToolbarContent {
+        let items = secondaryToolbarActions(for: route)
+        ToolbarItemGroup(placement: .cancellationAction) {
+            ForEach(items.filter { $0.placement == .close }) { item in
+                toolbarButton(ShellStrings.text(item.title), item.symbol, item.id, item.target, item.action)
             }
         }
     }
@@ -639,6 +567,13 @@ public struct LibraryView: View {
             .sharedBackgroundVisibility(.hidden)
         }
 
+        if let item = libraryActions.first(where: { $0.id == "activityLog.open" }) {
+            ToolbarItem(placement: .primaryAction) {
+                toolbarButton(ShellStrings.text(item.title), item.symbol, item.id, item.target, item.action)
+                    .disabled(menuPresented).accessibilityHidden(menuPresented)
+            }
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
         if let item = libraryActions.first(where: { $0.id == "controllers.open" }) {
             controllerItem(item)
             ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -658,6 +593,34 @@ public struct LibraryView: View {
         }
     }
 
+    var rootMenuToolbarActions: [ToolbarAction] {
+        guard hasRootMenu else { return toolbarActions }
+        if activityLogOpen { return [.init(title: "Done", symbol: "checkmark", id: "activityLog.close", target: "act.close", placement: .done, action: closeActivityLog)] }
+        if controllersOpen { return [.init(title: "Close controllers", symbol: "xmark", id: "controllers.close", target: "ctl.close", placement: .close, action: back)] }
+        if shellSettingsOpen { return [.init(title: "Close", symbol: "xmark", id: "shellSettings.close", target: "shs.close", placement: .close, action: closeShellSettings)] }
+        if settingsOpen { return [.init(title: "Close", symbol: "xmark", id: "library.back", target: "set.back", placement: .close, action: closeSettings)] }
+        return []
+    }
+
+    func secondaryToolbarActions(for route: MenuSecondaryRoute) -> [ToolbarAction] {
+        switch route {
+        case .buttonTest:
+            return [.init(title: "Controllers", symbol: "chevron.left", id: "buttonTest.close", target: "test.close", placement: .close, action: closeButtonTest)]
+        case .padMapping:
+            return [.init(title: "Back", symbol: "chevron.left", id: "padMapping.close", target: "map.close", placement: .close, action: closePadMapping)]
+        case .choice:
+            return [.init(title: "Close", symbol: "xmark", id: "choice.close", target: "pick.close", placement: .close, action: closeChoice)]
+        case .help:
+            return [.init(title: settingsOpen ? "Game settings" : "Close", symbol: settingsOpen ? "chevron.left" : "xmark", id: "help.done", target: "help.done", placement: .close, action: closeHelp)]
+        case .cheats:
+            return [.init(title: settingsOpen ? "Game settings" : "Close", symbol: settingsOpen ? "chevron.left" : "xmark", id: "cheats.close", target: "cht.close", placement: .close, action: closeCheats)]
+        case .homeScreen:
+            return [.init(title: settingsOpen ? "Game settings" : "Close", symbol: settingsOpen ? "chevron.left" : "xmark", id: "homeScreen.close", target: "hsc.close", placement: .close, action: closeHomeScreen)]
+        case .restoreBackup, .delete:
+            return []
+        }
+    }
+
     var toolbarActions: [ToolbarAction] {
         if buttonTestOpen { return [.init(title: "Controllers", symbol: "chevron.left", id: "buttonTest.close", target: "test.close", placement: .close, action: closeButtonTest)] }
         if padMapping != nil {
@@ -669,9 +632,11 @@ public struct LibraryView: View {
                     .init(title: "Done", symbol: "checkmark", id: "touchLayout.done", target: "lay.done", placement: .done, action: confirmTouchLayout)]
         }
         if helpGameID != nil { return [.init(title: settingsOpen ? "Game settings" : "Close", symbol: settingsOpen ? "chevron.left" : "xmark", id: "help.done", target: "help.done", placement: .close, action: closeHelp)] }
+        if cheatsGameID != nil { return [.init(title: settingsOpen ? "Game settings" : "Close", symbol: settingsOpen ? "chevron.left" : "xmark", id: "cheats.close", target: "cht.close", placement: .close, action: closeCheats)] }
         if homeScreenGameID != nil { return [.init(title: settingsOpen ? "Game settings" : "Close", symbol: settingsOpen ? "chevron.left" : "xmark", id: "homeScreen.close", target: "hsc.close", placement: .close, action: closeHomeScreen)] }
         if restoreBackupGameID != nil { return [] }
         if deleteGameID != nil { return [] }
+        if activityLogOpen { return [.init(title: "Done", symbol: "checkmark", id: "activityLog.close", target: "act.close", placement: .done, action: closeActivityLog)] }
         if controllersOpen { return [.init(title: "Close controllers", symbol: "xmark", id: "controllers.close", target: "ctl.close", placement: .close, action: back)] }
         if shellSettingsOpen { return [.init(title: "Close", symbol: "xmark", id: "shellSettings.close", target: "shs.close", placement: .close, action: closeShellSettings)] }
         if settingsOpen { return [.init(title: "Close", symbol: "xmark", id: "library.back", target: "set.back", placement: .close, action: closeSettings)] }
@@ -680,6 +645,7 @@ public struct LibraryView: View {
 
     var libraryActions: [ToolbarAction] {
         var items: [ToolbarAction] = []
+        items.append(.init(title: "Activity log", symbol: "chart.bar.xaxis", id: "activityLog.open", target: "lib.activityLog", placement: .actions, action: openActivityLog))
         items.append(.init(title: "Controllers", symbol: controllers.isEmpty ? "gamecontroller" : "gamecontroller.fill", id: "controllers.open", target: "lib.controllers", placement: .actions, action: openControllers))
         items.append(.init(title: "Settings", symbol: "gearshape", id: "shellSettings.open", target: "lib.shellSettings", placement: .actions, action: openShellSettings))
         return items
@@ -709,11 +675,9 @@ public struct LibraryView: View {
             .accessibilityLabel(accessibilityLabel)
             .accessibilityIdentifier(identifier)
             .shellTarget(target, radius: 22, action: action)
-            // Toolbar content is separately hosted: register its actual geometry without relying on preferences crossing hosts.
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                targets.toolbarValues[target] = FocusTarget(id: target, frame: frame, activate: action)
-            }
-            .onDisappear { targets.toolbarValues.removeValue(forKey: target) }
+            // Toolbar content is separately hosted: register its actual geometry with an instance owner so an outgoing
+            // transition view disappearing never clears a live toolbar target sharing the same key.
+            .modifier(ToolbarFocusRegistration(targets: targets, target: target, action: action))
     }
 
     var activeTargets: [FocusTarget] {
@@ -723,10 +687,12 @@ public struct LibraryView: View {
         else if padMapping != nil { prefix = "map." }
         else if choice != nil { prefix = "pick." }
         else if touchLayout != nil { prefix = "lay." }
+        else if cheatsGameID != nil { prefix = "cht." }
         else if helpGameID != nil { prefix = "help." }
         else if restoreBackupGameID != nil { prefix = "rst." }
         else if homeScreenGameID != nil { prefix = "hsc." }
         else if deleteGameID != nil { prefix = "del." }
+        else if activityLogOpen { prefix = "act." }
         else if controllersOpen { prefix = "ctl." }
         else if shellSettingsOpen { prefix = "shs." }
         else if settingsOpen { prefix = "set." }
@@ -735,80 +701,19 @@ public struct LibraryView: View {
     }
 }
 
-/// The top of the settings: the game's banner, whole and fading into the panel, then its state and title below it,
-/// so the banner's own logo and the title never overlap. Capped in height for a phone on its side.
-private struct PaneBanner: View {
-    let game: GameTile
-    let width: CGFloat
-    var body: some View {
-        let hasBanner = game.banner != nil && game.icon == nil
-        let bannerHeight = hasBanner ? min(width * 9 / 16, 220) : 0
-        // Centred on the artwork like the title in the game detail header, not sitting on its lower edge.
-        HStack(alignment: .center, spacing: 22) {
-            if !hasBanner { CoverThumbnail(game: game, showsShadow: false).frame(width: 96, height: 96) }
-            words(title: game.title).fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.top, max(0, bannerHeight - (hasBanner ? 22 : 0)))
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+private struct ToolbarFocusRegistration: ViewModifier {
+    let targets: FocusTargetBuffer
+    let target: String
+    let action: () -> Void
+    @State private var ownerID = UUID()
 
-    func words(title: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-
-            Text(title).shellType(ShellType.pageTitle).lineLimit(2)
-                .accessibilityAddTraits(.isHeader).accessibilityIdentifier("detail.title")
-            AlertStateChip(state: game.state)
-            // #696: the manifest's console, beside the state as the hidden detail header had it, with its memory note
-            if game.isSwitch2 {
-                ConsoleBadge().accessibilityIdentifier("detail.switch2")
-                Text(ShellStrings.text("A Switch 2 game. It needs a lot of memory and may not start on every device."))
-                    .shellText(12.5).foregroundStyle(.white.opacity(0.62)).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-/// A square app icon beside metadata, or an uncropped banner when no icon is available.
-struct CoverThumbnail: View {
-    let game: GameTile
-    var showsShadow = true
-    var cornerRadius: CGFloat = 18
-    var body: some View {
-        Group {
-            if let icon = game.icon {
-                Image(decorative: icon.image, scale: 1).resizable().interpolation(.high).scaledToFit()
-            } else if let banner = game.banner {
-                Image(decorative: banner.image, scale: 1).resizable().interpolation(.high).scaledToFit()
-            } else {
-                PlaceholderArt(title: game.title, seed: game.id)
-            }
-        }
-        .saturation(game.state == .playable ? 1 : 0)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .overlay(RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(.white.opacity(0.14)))
-        .shadow(color: showsShadow ? .black.opacity(0.4) : .clear, radius: 16, y: 6)
-        .accessibilityHidden(true)
-    }
-}
-/// Request a native side only when the system reports a vertical division; flat iPhone/iPad sheets stay adaptive.
-private struct MenuPlacement: ViewModifier {
-    var divided: Bool
-    var secondary: Bool
-    @ViewBuilder func body(content: Content) -> some View {
-        #if os(iOS)
-        if #available(iOS 27.0, *), divided {
-            content.presentationPlacement(secondary ? .trailing : .leading)
-        } else { content }
-        #else
+    func body(content: Content) -> some View {
         content
-        #endif
-    }
-}
-
-private struct LauncherMenuSizing: PresentationSizing {
-    var mapping: Bool
-    func proposedSize(for root: PresentationSizingRoot, context: PresentationSizingContext) -> ProposedViewSize {
-        if mapping { return PagePresentationSizing.page.proposedSize(for: root, context: context) }
-        return FormPresentationSizing.form.proposedSize(for: root, context: context)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                targets.registerToolbar(FocusTarget(id: target, frame: frame, activate: action), owner: ownerID)
+            }
+            .onDisappear {
+                targets.unregisterToolbar(id: target, owner: ownerID)
+            }
     }
 }

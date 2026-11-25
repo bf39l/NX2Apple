@@ -74,6 +74,7 @@ struct ConsolePadSnapshot: Equatable {
     let shellRoot: () -> String
     private let pads: () -> [ConsolePadSnapshot]
     private let steamPads: () -> [ConsolePadSnapshot]
+    private let hidPads: () -> [ConsolePadSnapshot]
     private let launch: (LibraryGame, [String: String], @escaping (Int32?, Error?) -> Void) -> Void
     private let artwork: (LibraryGame, String) -> NSImage?
     private let startingTimeout: TimeInterval
@@ -86,12 +87,17 @@ struct ConsolePadSnapshot: Equatable {
     var cloudGate = CloudSaveGate() { didSet { watchCloudGate() } }
     var cloudGameID: String?
     var cloudWatch: AnyCancellable?
+    var mngMigration: MngSaveMigrationCoordinator
+    var mngMigrationGameID: String?
+    var mngMigrationWatch: AnyCancellable?
+    var mngSaveSettings: SaveSettingsStore?
     var timeoutTask: Task<Void, Never>?
-    private var launchGeneration: UInt64 = 0
+    var launchGeneration: UInt64 = 0
+    var pendingLaunchUpstreamOverride: (gameID: String, upstream: EngineUpstreamKind)? = nil
     private var pendingLaunch: Task<Void, Never>?
     private let launchGracePeriod: TimeInterval
-    private var toastTask: Task<Void, Never>?
-    private var notices = ConsoleNoticeQueue()
+    var toastTask: Task<Void, Never>?
+    var notices = ConsoleNoticeQueue()
     private var clock: Timer?
     /// Real controllers by id, for Identify and player assignment.
     var devices: [String: GCController] = [:]
@@ -103,13 +109,15 @@ struct ConsolePadSnapshot: Equatable {
 
     init(launchGracePeriod: TimeInterval = 1.75, library: GameLibrary, controls: ControlLayout, repo: @escaping () -> String, lang: @escaping () -> Lang, labels: @escaping (String) -> String,
          pads: (() -> [ConsolePadSnapshot])? = nil, steamPads: (() -> [ConsolePadSnapshot])? = nil,
+         hidPads: (() -> [ConsolePadSnapshot])? = nil,
          launch: ((LibraryGame, [String: String], @escaping (Int32?, Error?) -> Void) -> Void)? = nil,
          artwork: ((LibraryGame, String) -> NSImage?)? = nil, startingTimeout: TimeInterval = 20, observeSystem: Bool = true, playerOutput: ((String, Int) -> Void)? = nil,
          player: @escaping () -> PlayerProfile? = { nil },
          saves: @escaping (String) -> (global: SaveGlobalSettings, game: SaveGameOverride)? = { _ in nil },
          sticks: @escaping () -> StickDeadzoneSettings? = { nil },
-         shellRoot: @escaping () -> String = { "" }) {
-        sessions = PlaySessionStore(file: observeSystem ? PlaySessionStore.defaultFile : nil)   // a test keeps its history in memory
+         shellRoot: @escaping () -> String = { "" },
+         sessions: PlaySessionStore? = nil) {
+        self.sessions = sessions ?? PlaySessionStore(file: observeSystem ? PlaySessionStore.defaultFile : nil)   // a test keeps its history in memory
         tracking.observesSystem = observeSystem
         self.saves = saves
         self.sticks = sticks
@@ -118,9 +126,11 @@ struct ConsolePadSnapshot: Equatable {
         self.launchGracePeriod = launchGracePeriod
         self.player = player
         self.library = library; self.controls = controls; self.repo = repo; self.lang = lang; self.labels = labels
+        self.mngMigration = MngSaveMigrationCoordinator(defaults: library.defaults)
         self.startingTimeout = startingTimeout
         self.pads = pads ?? { [] }
         self.steamPads = steamPads ?? { pads == nil ? SteamLinkGamepads.shared.snapshots : [] }
+        self.hidPads = hidPads ?? { pads == nil ? HIDGamepads.shared.snapshots : [] }
         self.launch = launch ?? Self.openApplication
         self.artwork = artwork ?? { [banners = library.artworkDirectory] game, repo in
             GameLibrary.artwork(for: game, slot: .thumbnail, repo: repo, banners: banners, maxPixel: Self.tilePixels)
@@ -128,11 +138,13 @@ struct ConsolePadSnapshot: Equatable {
         if pads == nil { self.devicePads = true }
         state.padMerge = controls.padMerge
         library.objectWillChange.sink { [weak self] _ in self?.queueRefresh() }.store(in: &cancellables)
+        self.sessions.$sessions.dropFirst().sink { [weak self] _ in self?.queueRefresh() }.store(in: &cancellables)
         controls.$padMerge.sink { [weak self] merged in self?.state.padMerge = merged }.store(in: &cancellables)
         // A @Published sink runs before the value is stored: the layout is read on the next turn of the run loop.
         controls.$pad.combineLatest(controls.$padMode).dropFirst().receive(on: DispatchQueue.main)
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.refreshPadLayout() } }.store(in: &cancellables)
         watchCloudGate()
+        watchMngMigration()
         watchTools()
         refresh()
         refreshControllers(announce: false)
@@ -143,6 +155,9 @@ struct ConsolePadSnapshot: Equatable {
         let center = NotificationCenter.default
         observers = [
             center.addObserver(forName: .steamLinkPadsChanged, object: SteamLinkGamepads.shared, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshControllers(announce: false) }
+            },
+            center.addObserver(forName: .hidPadsChanged, object: HIDGamepads.shared, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshControllers(announce: false) }
             },
             center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] note in
@@ -215,12 +230,26 @@ struct ConsolePadSnapshot: Equatable {
         let store = SavedChoices(app: game.appPath, titleID: game.titleID)
         var values: [String: String] = [:]
         for s in settings { values[s.env] = s.storeBacked ? store.current(s) : game.launchValue(s) }
-        return withHistory(of: game, ConsoleGame(id: game.id.uuidString, title: game.displayName(lang()), version: version(of: game),
-                           platforms: Self.platforms(of: game), artwork: cover(game), artworkFocus: game.artwork.focus(for: .thumbnail),
-                           status: Self.status(of: game, brokenMessage: t("console.broken")), settings: settings, values: values,
-                           mapsButtons: game.isReady && SavedChoices.appReadsControllerMappings(app: game.appPath)
-                               && game.controllerSavingEnabled(environment: game.launchOptions),
-                           isMacNativeGames: game.playableMacBundle?.upstream == .macNativeGames))
+        let macUpstream = game.playableMacBundle?.upstream
+        let builtTunedName = (macUpstream?.group == .gameTuned) ? macUpstream?.displayName : nil
+        let tunedNames = EngineUpstream.tunedEngines(forTitleID: game.titleID).map(\.displayName)
+        var console = ConsoleGame(id: game.id.uuidString, title: game.displayName(lang()), version: version(of: game),
+                                  platforms: Self.platforms(of: game), artwork: cover(game), artworkFocus: game.artwork.focus(for: .thumbnail),
+                                  status: Self.status(of: game, brokenMessage: t("console.broken")), settings: settings, values: values,
+                                  mapsButtons: game.isReady && SavedChoices.appReadsControllerMappings(app: game.appPath)
+                                      && game.controllerSavingEnabled(environment: game.launchOptions),
+                                  isMacNativeGames: macUpstream == .macNativeGames,
+                                  builtTunedEngineName: builtTunedName,
+                                  tunedEngineNames: tunedNames)
+        applyMultiBuildInfo(&console, from: game)
+        // built by nxkit without a game profile (v0lumehi/nxkit#54): read here, the views never touch the file
+        if game.isReady, let app = game.playableMacBundle, app.upstream == .nxkit, let profile = NxkitBuildProfile.read(app: game.appPath) {
+            console.genericBuild = profile
+            console.genericReport = NxkitFeedback.genericBuildReportURL(gameName: game.displayName(lang()), titleID: game.titleID,
+                                                                        gameVersion: app.version ?? "",
+                                                                        nxkitVersion: profile.nxkitVersion ?? nxkitVersion(game.titleID) ?? "")
+        }
+        return withHistory(of: game, console)
     }
 
     /// The library's game behind a console game (LiveConsoleDriver+Mapping.swift reads its own button mapping).
@@ -279,10 +308,12 @@ struct ConsolePadSnapshot: Equatable {
 
     func cancelPendingLaunch() -> Bool {
         guard state.startingGameID != nil else { return false }
+        pendingLaunchUpstreamOverride = nil
         pendingLaunch?.cancel(); pendingLaunch = nil
         timeoutTask?.cancel()
         if launchedPID == nil || launchedGame?.id.uuidString != state.startingGameID {
             launchGeneration &+= 1
+            mngMigration.cancel()
             cloudGate.cancel()
             state.returnFromGame()
             gameEnded()
@@ -293,52 +324,62 @@ struct ConsolePadSnapshot: Equatable {
     }
 
     private func beginLaunch(_ gameID: String, generation: UInt64) {
-        guard launchGeneration == generation, state.startingGameID == gameID, let game = library.games.first(where: { $0.id.uuidString == gameID }) else { return }
+        guard launchGeneration == generation, state.startingGameID == gameID,
+              let game = resolvedLaunchGame(for: gameID) else { return }
         let environment = GameStart.environment(for: game, library: library, controls: controls, repo: repo(), labels: labels, lang: lang(), fullscreen: true, player: player(), saves: saves(game.titleID), sticks: sticks(), homeMenu: true)   // the Home menu's way back here (#952)
             .merging(pointerHidden() ? ["DM_CURSOR_HIDDEN": "1", "NXKIT_CURSOR_HIDDEN": "1"] : [:]) { $1 }   // the game is a new process: without this its pointer shows until its own idle wait ends (nxkit reads its own name)
             .merging(FrameTimes.recordingEnvironment(for: game, library: library.folder)) { $1 }   // a frame-time recording, as the desktop Play adds (FrameTimes.swift)
         state.starting = .preparing
-        cloudGameID = gameID
-        cloudGate.begin(game, environment: environment, proceed: { [weak self] choice in   // the cloud's save first (LiveConsoleDriver+CloudSave.swift, #957)
+        beginAfterMngMigration(game: game, gameID: gameID, generation: generation) { [weak self] in
+            guard let self, self.launchGeneration == generation, self.state.startingGameID == gameID else { return }
+            self.cloudGameID = gameID
+            self.cloudGate.begin(game, environment: environment, proceed: { [weak self] choice in   // the cloud's save first (LiveConsoleDriver+CloudSave.swift, #957)
             guard let self, self.launchGeneration == generation, self.state.startingGameID == gameID else { return }
             self.state.starting = .preparing
             self.prepareLaunch { [weak self] in
                 guard let self else { return }
                 guard self.launchGeneration == generation, self.state.startingGameID == gameID else { return }
-                let latest = self.library.games.first(where: { $0.id == game.id }) ?? game
+                let latest = self.resolvedLaunchGame(for: gameID) ?? game
                 MacGameMode.shared.prepareForLaunch(enabled: latest.macGameModeDesired, forApp: latest.appPath) { [weak self] error in
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         guard self.launchGeneration == generation, self.state.startingGameID == gameID else { return }
-                        if let error { self.state.returnFromGame(); self.gameEnded(); self.showToast(error.localizedDescription, kind: "error"); return }
+                        if let error { self.clearLaunchOverrideAndFail(error.localizedDescription); return }
+                        self.pendingLaunchUpstreamOverride = nil
                         self.openGame(latest, environment: environment.merging(choice) { $1 }, gameID: gameID, generation: generation)
                     }
                 }
             }
         }, ended: { [weak self] in
             guard let self, self.launchGeneration == generation else { return }
-            self.state.returnFromGame()
+            self.pendingLaunchUpstreamOverride = nil; self.state.returnFromGame()
         })
+        }
     }
 
     private func openGame(_ game: LibraryGame, environment: [String: String], gameID: String, generation: UInt64) {
+        let armedCheats = CheatFuseMonitor.shared.prepareAndArm(for: game, shellRoot: shellRoot())
         launch(game, environment) { [weak self] pid, error in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self else { CheatFuseMonitor.shared.abort(armedCheats); return }
                     // LaunchServices may return an app started elsewhere. A stale callback does not own that process.
-                    guard self.launchGeneration == generation else { return }
-                    guard self.state.startingGameID == gameID else { return }
-                    if let error { self.state.returnFromGame(); self.gameEnded(); self.showToast(error.localizedDescription, kind: "error"); return }
+                    guard self.launchGeneration == generation else { CheatFuseMonitor.shared.abort(armedCheats); return }
+                    guard self.state.startingGameID == gameID else { CheatFuseMonitor.shared.abort(armedCheats); return }
+                    if let error { CheatFuseMonitor.shared.abort(armedCheats); self.state.returnFromGame(); self.gameEnded(); self.showToast(error.localizedDescription, kind: "error"); return }
                     self.launchedPID = pid
                     self.library.recordPlayed(game.id)   // the Recently played order (#937)
                     if let pid { self.beginTracking(game, pid: pid, environment: environment) }   // the session, its pause and its end (+Sessions)
                     self.launchedGame = game
                     if let pid {   // the launcher's one watcher and its switch (ReturnAfterPlay.swift), and the cloud's send an engine leaves to it (SaveEngine)
+                        CheatFuseMonitor.shared.didStart(pid: pid, pending: armedCheats)
                         GameReturnWatcher.shared.didStart(pid: pid) { [weak self] in
-                            CloudSaveSend.afterExit(app: game.appPath, environment: environment, engine: SaveEngines.forApp(game.appPath))
+                            CheatFuseMonitor.shared.didExit(pid: pid)
+                            CloudSaveSend.afterExit(app: game.appPath, titleID: game.titleID, environment: environment, engine: SaveEngines.forApp(game.appPath, titleID: game.titleID))
                             self?.gameDidTerminate(pid: pid)
                         }
+                    } else {
+                        CheatFuseMonitor.shared.abort(armedCheats)
                     }
                     self.state.starting = .opening
                     self.timeoutTask?.cancel()
@@ -535,6 +576,10 @@ struct ConsolePadSnapshot: Equatable {
     weak var builds: BuildStore?
     weak var buildQueue: BuildQueueStore?
     var buildEngineID: () -> String = { "" }
+    /// The nxkit version that built a game, by title id (BuildStore.nxkitRecord), for the report of a build without a game profile.
+    var nxkitVersion: (String) -> String? = { _ in nil }
+    /// Opens a page in the browser (the report of a build without a game profile). Tests replace it.
+    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
     /// Controllers that have no player take the next free one, in the order they are listed, as a console does. A fifth has none.
     static func autoAssigned(_ pads: [ConsolePadSnapshot], remembered: [String: Int] = [:]) -> [ConsolePadSnapshot] {
@@ -703,6 +748,7 @@ struct ConsolePadSnapshot: Equatable {
             }
         }
         snapshots += steamPads()
+        snapshots += hidPads()
         let live = Set(snapshots.map(\.id))
         batteryWatchers = batteryWatchers.filter { live.contains($0.key) || !devicePads }
         overrides = overrides.filter { live.contains($0.key) }
@@ -723,49 +769,5 @@ struct ConsolePadSnapshot: Equatable {
             state.controllers = list
         }
         if controls.padMode == .auto { refreshPadLayout() }   // Auto's buttons follow the controller connected now
-    }
-
-    // MARK: Navigation
-
-    func dismissToast() { toastTask?.cancel(); notices.clear(); state.toast = nil; state.identifyingControllerID = nil }
-    func exitToDesktop() { if state.pausedGameID != nil { state.askQuitPaused(then: .leave(selecting: nil)) } else { state.exitToDesktop() } }
-    func returnFromGame() { state.returnFromGame() }
-
-    /// A passing message goes through the one queue (ConsoleNotices.swift): one at a time, same kinds replace each other, none while a game starts.
-    /// The top bar's activity chip follows the build store: the operation line and the current stage's share (ConsoleActivity).
-    func bindActivity(_ build: BuildStore) {
-        let update: () -> Void = { [weak self, weak build] in
-            guard let self, let build else { return }
-            guard build.running else { self.state.activity = nil; return }
-            let title = build.operationTitle ?? build.t("library.preparing")
-            let share = build.stages.last { $0.state == .running }?.percent.map { min(max($0 / 100, 0), 1) }
-            self.state.activity = ConsoleActivity(title: title, stageProgress: share,
-                                                  spokenProgress: share.map { String(format: build.t("console.stageProgress"), Int($0 * 100)) } ?? "")
-        }
-        build.$running.sink { _ in DispatchQueue.main.async(execute: update) }.store(in: &cancellables)
-        build.$operation.sink { _ in DispatchQueue.main.async(execute: update) }.store(in: &cancellables)
-        build.$stages.sink { _ in DispatchQueue.main.async(execute: update) }.store(in: &cancellables)
-        update()
-    }
-
-    func showToast(_ message: String, glyph: ConsoleGlyphs.Glyph? = nil, kind: String = "general") {
-        notices.post(kind: kind, message: message, glyph: glyph, now: Date(), suppressed: state.startingGame != nil)
-        publishNotices()
-    }
-
-    private func publishNotices() {
-        notices.advance(now: Date(), suppressed: state.startingGame != nil)
-        let shown = notices.current
-        if state.toast?.id != shown?.id {
-            state.toast = shown.map { ConsoleToast(id: $0.id, glyph: $0.glyph, message: $0.message) }
-        }
-        if shown == nil { state.identifyingControllerID = nil }
-        toastTask?.cancel()
-        guard let until = notices.until else { return }
-        toastTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(max(0.05, until.timeIntervalSinceNow) * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            self?.publishNotices()
-        }
     }
 }

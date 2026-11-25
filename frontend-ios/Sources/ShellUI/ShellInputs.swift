@@ -136,13 +136,15 @@ public struct SettingRow: Identifiable, Equatable, Sendable {
     public var enabled: Bool
     /// The value is the shell settings' choice, because the game has none of its own.
     public var fromShell: Bool
+    /// The value comes from per-game `Documents/games/<title ID>/env.txt`, because the UI has no explicit choice.
+    public var fromEnvFile: Bool
     /// The value differs from the game profile's tested default (#453): the row draws a small dot before its label.
     public var changed = false
     /// Label and note are texts of the game's launcher.json: shown in the player's language when the catalog has them.
-    public init(id: String, label: String, note: String = "", kind: SettingKind, value: String, enabled: Bool = true, fromShell: Bool = false) {
-        self.init(id: id, label: label, note: note, kind: kind, value: value, enabled: enabled, fromShell: fromShell, in: ShellStrings.bundle)
+    public init(id: String, label: String, note: String = "", kind: SettingKind, value: String, enabled: Bool = true, fromShell: Bool = false, fromEnvFile: Bool = false) {
+        self.init(id: id, label: label, note: note, kind: kind, value: value, enabled: enabled, fromShell: fromShell, fromEnvFile: fromEnvFile, in: ShellStrings.bundle)
     }
-    init(id: String, label: String, note: String = "", kind: SettingKind, value: String, enabled: Bool = true, fromShell: Bool = false, in bundle: Bundle) {
+    init(id: String, label: String, note: String = "", kind: SettingKind, value: String, enabled: Bool = true, fromShell: Bool = false, fromEnvFile: Bool = false, in bundle: Bundle) {
         self.id = id
         self.label = ShellStrings.setting(label, bundle: bundle)
         self.note = ShellStrings.setting(note, bundle: bundle)
@@ -150,6 +152,7 @@ public struct SettingRow: Identifiable, Equatable, Sendable {
         self.value = value
         self.enabled = enabled
         self.fromShell = fromShell
+        self.fromEnvFile = fromEnvFile
     }
 }
 
@@ -183,10 +186,14 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
     public var cloudCanUseShell: Bool
     /// Readable timestamp label of the newest backup in `<appFolder>/save-backups/`, or nil when none exists.
     public var latestSaveBackup: String?
+    /// Localized per-game play history summary ("14 hr, 25 min · Played 18 times"), or nil when never played.
+    public var playSummary: String?
+    /// Lightweight summary of this game's cheats for the Game Settings entry row.
+    public var cheatsSummary: GameCheatsSummary?
     public init(game: GameTile, sections: [SettingSection] = [], dataSource: String = "", dataNote: String = "",
                 cloudSaves: String? = nil, cloudNote: String = "", dlc: String = "", hasModifiedSettings: Bool = false,
                 dataFromShell: Bool = false, cloudFromShell: Bool = false, cloudCanUseShell: Bool = false,
-                latestSaveBackup: String? = nil) {
+                latestSaveBackup: String? = nil, playSummary: String? = nil, cheatsSummary: GameCheatsSummary? = nil) {
         self.game = game
         self.sections = sections
         self.dataSource = dataSource
@@ -199,7 +206,93 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
         self.cloudFromShell = cloudFromShell
         self.cloudCanUseShell = cloudCanUseShell
         self.latestSaveBackup = latestSaveBackup
+        self.playSummary = playSummary
+        self.cheatsSummary = cheatsSummary
     }
+}
+
+/// One day bar in the Activity Log's 14-day play chart (#1161).
+public struct ActivityDayBar: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var label: String
+    public var seconds: Double
+
+    public init(id: String, label: String, seconds: Double) {
+        self.id = id
+        self.label = label
+        self.seconds = seconds
+    }
+}
+
+/// One game row in the Activity Log (#1161).
+public struct ActivityGameEntry: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var game: GameTile?
+    public var seconds: Double
+    public var totalTime: String
+    public var sessions: Int
+    public var averageTime: String
+    public var daysPlayed: Int
+    public var firstPlayed: String
+    public var lastPlayed: String
+    public var lastPlayedDate: Date
+    public var isInstalled: Bool
+
+    public init(id: String, title: String, game: GameTile? = nil, seconds: Double, totalTime: String, sessions: Int,
+                averageTime: String, daysPlayed: Int, firstPlayed: String, lastPlayed: String, lastPlayedDate: Date,
+                isInstalled: Bool) {
+        self.id = id
+        self.title = title
+        self.game = game
+        self.seconds = seconds
+        self.totalTime = totalTime
+        self.sessions = sessions
+        self.averageTime = averageTime
+        self.daysPlayed = daysPlayed
+        self.firstPlayed = firstPlayed
+        self.lastPlayed = lastPlayed
+        self.lastPlayedDate = lastPlayedDate
+        self.isInstalled = isInstalled
+    }
+}
+
+/// Presentation-ready Activity Log snapshot supplied by `ShellHost` (#1161).
+public struct ActivityLogSnapshot: Equatable, Sendable {
+    public var totalTime: String
+    public var totalSeconds: Double
+    public var totalSessions: Int
+    public var activeDaysCount: Int
+    public var gamesPlayedCount: Int
+    public var activeDayKeys: Set<String>
+    public var recentDays: [ActivityDayBar]
+    public var entries: [ActivityGameEntry]
+    public var referenceDate: Date
+
+    public init(totalTime: String, totalSeconds: Double, totalSessions: Int, activeDaysCount: Int, gamesPlayedCount: Int,
+                activeDayKeys: Set<String>, recentDays: [ActivityDayBar], entries: [ActivityGameEntry], referenceDate: Date) {
+        self.totalTime = totalTime
+        self.totalSeconds = totalSeconds
+        self.totalSessions = totalSessions
+        self.activeDaysCount = activeDaysCount
+        self.gamesPlayedCount = gamesPlayedCount
+        self.activeDayKeys = activeDayKeys
+        self.recentDays = recentDays
+        self.entries = entries
+        self.referenceDate = referenceDate
+    }
+
+    public static let empty = ActivityLogSnapshot(
+        totalTime: "0m",
+        totalSeconds: 0,
+        totalSessions: 0,
+        activeDaysCount: 0,
+        gamesPlayedCount: 0,
+        activeDayKeys: [],
+        recentDays: [],
+        entries: [],
+        referenceDate: Date(timeIntervalSinceReferenceDate: 0)
+    )
 }
 
 public struct ControllerInfo: Identifiable, Equatable, Sendable {
@@ -350,6 +443,30 @@ public struct ShellActions {
     public var onCancelSideloadCertificateImport: (@MainActor () -> Void)?
     /// Removes the stored sideload `.p12` certificate from Keychain.
     public var onRemoveSideloadCertificate: (@MainActor () -> Void)?
+    /// Loads the current cheats snapshot for `gameID` (synchronous fallback for previews/tests).
+    public var onLoadCheats: ((_ gameID: String) -> GameCheatsSnapshot)?
+    /// Loads the current cheats snapshot for `gameID` off the main thread.
+    public var onLoadCheatsAsync: (@MainActor (_ gameID: String) async -> GameCheatsSnapshot)?
+    /// Sets the per-game cheats master switch (`.cheats-off-<TID>`) and returns the refreshed snapshot.
+    public var onToggleCheatMaster: ((_ gameID: String, _ on: Bool) -> GameCheatsSnapshot)?
+    /// Sets the per-game cheats master switch off the main thread and returns the refreshed snapshot.
+    public var onToggleCheatMasterAsync: (@MainActor (_ gameID: String, _ on: Bool) async -> GameCheatsSnapshot)?
+    /// Toggles one switchable cheat entry in `<BID>.enabled` and returns the refreshed snapshot.
+    public var onToggleCheatEntry: ((_ gameID: String, _ key: String, _ on: Bool) -> GameCheatsSnapshot)?
+    /// Toggles one switchable cheat entry off the main thread and returns the refreshed snapshot.
+    public var onToggleCheatEntryAsync: (@MainActor (_ gameID: String, _ key: String, _ on: Bool) async -> GameCheatsSnapshot)?
+    /// Opens the system file picker to import a `.txt` cheat file for `gameID`.
+    public var onImportCheatFile: (@MainActor (_ gameID: String) async -> CheatImportOutcome)?
+    /// Confirms saving a build-mismatched `.txt` file under the game's current build ID.
+    public var onConfirmMismatchCheatImport: ((_ gameID: String, _ token: String) -> CheatImportOutcome)?
+    /// Confirms saving a build-mismatched `.txt` file off the main thread.
+    public var onConfirmMismatchCheatImportAsync: (@MainActor (_ gameID: String, _ token: String) async -> CheatImportOutcome)?
+    /// Discards any staged build-mismatched cheat file import.
+    public var onCancelMismatchCheatImport: ((_ gameID: String) -> Void)?
+    /// Dismisses the 30-second crash guard fuse alert for `gameID` and returns the refreshed snapshot.
+    public var onDismissCheatFuseAlert: ((_ gameID: String) -> GameCheatsSnapshot)?
+    /// Dismisses the 30-second crash guard fuse alert off the main thread and returns the refreshed snapshot.
+    public var onDismissCheatFuseAlertAsync: (@MainActor (_ gameID: String) async -> GameCheatsSnapshot)?
 
     public var supportsHomeScreen: Bool {
         onAddToHomeScreenWithGuide != nil || onAddToHomeScreen != nil || onCopyShortcutURL != nil
@@ -361,6 +478,10 @@ public struct ShellActions {
 
     public var supportsSideloadCertificate: Bool {
         onPickSideloadCertificateFile != nil && onConfirmSideloadCertificatePassword != nil
+    }
+
+    public var supportsCheats: Bool {
+        onLoadCheatsAsync != nil || onLoadCheats != nil
     }
 
     public init(onSelect: @escaping (String) -> Void = { _ in }, onPlay: @escaping (String) -> Void = { _ in },
@@ -388,7 +509,19 @@ public struct ShellActions {
                 onPickSideloadCertificateFile: (@MainActor () async -> SideloadCertificatePickResult)? = nil,
                 onConfirmSideloadCertificatePassword: (@MainActor (_ password: String) async -> String?)? = nil,
                 onCancelSideloadCertificateImport: (@MainActor () -> Void)? = nil,
-                onRemoveSideloadCertificate: (@MainActor () -> Void)? = nil) {
+                onRemoveSideloadCertificate: (@MainActor () -> Void)? = nil,
+                onLoadCheats: ((_ gameID: String) -> GameCheatsSnapshot)? = nil,
+                onLoadCheatsAsync: (@MainActor (_ gameID: String) async -> GameCheatsSnapshot)? = nil,
+                onToggleCheatMaster: ((_ gameID: String, _ on: Bool) -> GameCheatsSnapshot)? = nil,
+                onToggleCheatMasterAsync: (@MainActor (_ gameID: String, _ on: Bool) async -> GameCheatsSnapshot)? = nil,
+                onToggleCheatEntry: ((_ gameID: String, _ key: String, _ on: Bool) -> GameCheatsSnapshot)? = nil,
+                onToggleCheatEntryAsync: (@MainActor (_ gameID: String, _ key: String, _ on: Bool) async -> GameCheatsSnapshot)? = nil,
+                onImportCheatFile: (@MainActor (_ gameID: String) async -> CheatImportOutcome)? = nil,
+                onConfirmMismatchCheatImport: ((_ gameID: String, _ token: String) -> CheatImportOutcome)? = nil,
+                onConfirmMismatchCheatImportAsync: (@MainActor (_ gameID: String, _ token: String) async -> CheatImportOutcome)? = nil,
+                onCancelMismatchCheatImport: ((_ gameID: String) -> Void)? = nil,
+                onDismissCheatFuseAlert: ((_ gameID: String) -> GameCheatsSnapshot)? = nil,
+                onDismissCheatFuseAlertAsync: (@MainActor (_ gameID: String) async -> GameCheatsSnapshot)? = nil) {
         self.onSelect = onSelect
         self.onPlay = onPlay
         self.onChange = onChange
@@ -423,5 +556,17 @@ public struct ShellActions {
         self.onConfirmSideloadCertificatePassword = onConfirmSideloadCertificatePassword
         self.onCancelSideloadCertificateImport = onCancelSideloadCertificateImport
         self.onRemoveSideloadCertificate = onRemoveSideloadCertificate
+        self.onLoadCheats = onLoadCheats
+        self.onLoadCheatsAsync = onLoadCheatsAsync
+        self.onToggleCheatMaster = onToggleCheatMaster
+        self.onToggleCheatMasterAsync = onToggleCheatMasterAsync
+        self.onToggleCheatEntry = onToggleCheatEntry
+        self.onToggleCheatEntryAsync = onToggleCheatEntryAsync
+        self.onImportCheatFile = onImportCheatFile
+        self.onConfirmMismatchCheatImport = onConfirmMismatchCheatImport
+        self.onConfirmMismatchCheatImportAsync = onConfirmMismatchCheatImportAsync
+        self.onCancelMismatchCheatImport = onCancelMismatchCheatImport
+        self.onDismissCheatFuseAlert = onDismissCheatFuseAlert
+        self.onDismissCheatFuseAlertAsync = onDismissCheatFuseAlertAsync
     }
 }

@@ -9,6 +9,11 @@ final class FrenchLocalizationTests: IsolatedDefaultsTestCase {
     /// Keys whose French text is the English one on purpose: names, units, button letters, codes.
     static let sameAsEnglish: Set<String> = [
         "launch.opt.DM_SCREEN_ASPECT.1.6",   // MacBook is a product name
+        // Texture filtering multipliers use the same numeric units in every language.
+        "launch.opt.DM_NVN_ANISO.2",
+        "launch.opt.DM_NVN_ANISO.4",
+        "launch.opt.DM_NVN_ANISO.8",
+        "launch.opt.DM_NVN_ANISO.16",
         "library.chip.both", "shell.choiceLauncher", "onboarding.xcode.section", "onboarding.step.xcode",
         "onboarding.platform.mac", "onboarding.platform.iphone", "onboarding.background.python",
         "onboarding.background.dotnet", "onboarding.demo.mario",
@@ -19,7 +24,7 @@ final class FrenchLocalizationTests: IsolatedDefaultsTestCase {
         "dep.spirv.win", "dep.zstd.win", "dep.python.hint", "controls.mode.auto", "controls.fn.A",
         "controls.fn.B", "controls.fn.X", "controls.fn.Y", "controls.fn.L", "controls.fn.R",
         "controls.fn.ZL", "controls.fn.ZR", "controls.fn.Plus", "controls.fn.Minus", "launch.mods",
-        "pad.options", "engine.channel.stable", "launch.opt.DM_PRESENT_UPSCALE.off", "launch.opt.DM_PRESENT_UPSCALE.metalfx", "launch.opt.DM_UPSCALER.metalfx", "launch.opt.DM_SCREEN_ASPECT.0", "key.tab",
+        "pad.options", "engine.channel.stable", "launch.opt.DM_PRESENT_UPSCALE.off", "launch.opt.DM_PRESENT_UPSCALE.metalfx", "launch.opt.DM_UPSCALER.metalfx", "launch.opt.DM_ROTATION.portrait", "launch.opt.DM_SCREEN_ASPECT.0", "launch.opt.DM_SCREEN_ASPECT.1.6", "launch.opt.DM_NVN_TEX_MIP_SKIP.0", "key.tab",
         "switch2.badge",   // the console's name
         "nxkit.name", "nxkit.version",   // the engine's name and its version number
         "ios.ui.switch2Badge",   // the console's name
@@ -33,7 +38,8 @@ final class FrenchLocalizationTests: IsolatedDefaultsTestCase {
         "ios.host.ok", "ios.host.shellName", "ios.ui.interface", "ios.ui.padPlus", "ios.ui.version", "ios.ui.touchEditorPortrait", "ios.ui.gameVersionLabel",
         // Brand and device names on the batch refresh badge and platform tags.
         "batchRefresh.versionBadge", "batchRefresh.platformIOS", "batchRefresh.platformMac",
-        "library.section.mac", "library.section.mobile", "library.chip.mng",
+        "library.section.mac", "library.section.mobile",
+        "engine.platform.macOnly", "engine.platform.macIOS", "engine.scope.kws", "engine.scope.noLagKart",
     ]
 
     func testNothingIsLeftInEnglishButTheListedNames() {

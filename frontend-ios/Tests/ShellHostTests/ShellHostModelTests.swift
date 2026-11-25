@@ -102,7 +102,8 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         let text = try #require(launcher.launched.last?.environment["DM_GAME_MENU_TEXT"])
         #expect(text == ShellHostModel.gameMenuText)
         let lines = text.components(separatedBy: "\n")
-        #expect(lines.count == 2 && lines.allSatisfy { !$0.isEmpty && !$0.contains(";") })
+        #expect(lines.count == 5 && lines.allSatisfy { !$0.isEmpty && !$0.contains(";") })
+        #expect(lines[4].contains("%@"))
     }
 
     /// BUG-23: Quit returns the player to the shell library rather than force-closing the whole app.
@@ -342,6 +343,25 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         #expect(model.notice?.contains("No game data for Orbit Fixture") == true)
     }
 
+    @Test func pickingInvalidGameDataFolderKeepsPreviousWorkingFolder() async throws {
+        let box = try Sandbox()
+        let good = box.root.appendingPathComponent("Good/Orbit", isDirectory: true)
+        try box.write("", to: good.appendingPathComponent("fixture.marker"))
+        let empty = box.root.appendingPathComponent("Empty", isDirectory: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+
+        let goodModel = ShellHostModel(config: box.config(), picker: FakePicker(url: good))
+        await goodModel.pickGameDataNow(Fixtures.orbit)
+        #expect(try detail(goodModel).game.state == .playable)
+        #expect(try detail(goodModel).dataSource == "Orbit")
+
+        let badModel = ShellHostModel(config: box.config(), picker: FakePicker(url: empty))
+        await badModel.pickGameDataNow(Fixtures.orbit)
+        #expect(badModel.notice?.contains("No game data for Orbit Fixture") == true)
+        #expect(try detail(badModel).game.state == .playable)
+        #expect(try detail(badModel).dataSource == "Orbit")
+    }
+
     @Test func aCancelledPickChangesNothing() async throws {
         let box = try Sandbox()
         let model = ShellHostModel(config: box.config(), picker: FakePicker(url: nil))
@@ -384,7 +404,7 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         #expect(orbit.dataNote.contains("no longer readable"))
     }
 
-    private func shellSettings() -> ShellSettingsStore { ShellSettingsStore(defaults: UserDefaults(suiteName: "t-shell-\(UUID().uuidString)")!) }
+    private func shellSettings() -> ShellSettingsStore { ShellSettingsStore(defaults: TestDefaults.make("t-shell")) }
 
     /// The orbit fixture with a performance overlay row of its own, like a game whose list has `DM_METAL_HUD`.
     private func giveOrbitAnOverlayRow(_ box: Sandbox) throws {

@@ -499,8 +499,8 @@ import XCTest
         XCTAssertEqual(reopened.value as? String, "0")
     }
 
-    // Run on a standard iPhone: editing follows gameplay's landscape-only policy.
-    func testPhoneEditorOpensLandscapeAndRestoresPortraitBrowsing() {
+    // Run on a standard iPhone: editing follows the live orientation, switches landscape/portrait in options, and restores browsing.
+    func testPhoneEditorOpensPortraitRotatesAndSwitchesPose() {
         XCUIDevice.shared.orientation = .portrait
         launch("shell-settings")
         let arrange = app.buttons["shellSettings.arrange"]
@@ -508,26 +508,66 @@ import XCTest
         arrange.tap()
         let options = app.buttons["touchLayout.options"]
         XCTAssertTrue(options.waitForExistence(timeout: 5))
-        let landscape = NSPredicate { _, _ in
-            let frame = self.app.otherElements["touchLayout.editor"].firstMatch.frame
+        let editor = app.otherElements["touchLayout.editor"].firstMatch
+        let isPortrait = NSPredicate { _, _ in
+            let frame = editor.frame
+            return frame.height > frame.width
+        }
+        let isLandscape = NSPredicate { _, _ in
+            let frame = editor.frame
             return frame.width > frame.height
         }
-        expectation(for: landscape, evaluatedWith: nil)
+        expectation(for: isPortrait, evaluatedWith: nil)
         waitForExpectations(timeout: 5)
+
+        let stick = app.buttons["Left stick"].firstMatch
+        XCTAssertTrue(stick.exists)
+        XCTAssertGreaterThan(stick.frame.midY, app.windows.firstMatch.frame.midY)
+
+        options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+        let pose = app.segmentedControls["setting.lay.pose"]
+        XCTAssertTrue(pose.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["touchLayout.orientation"].label, "Portrait")
+        XCTAssertTrue(pose.buttons["Portrait"].isSelected)
+
+        pose.buttons["Landscape"].tap()
+        expectation(for: NSPredicate { _, _ in
+            self.app.staticTexts["touchLayout.orientation"].label == "Landscape"
+        }, evaluatedWith: nil)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(pose.buttons["Landscape"].isSelected)
+
+        pose.buttons["Portrait"].tap()
+        expectation(for: NSPredicate { _, _ in
+            self.app.staticTexts["touchLayout.orientation"].label == "Portrait"
+        }, evaluatedWith: nil)
+        waitForExpectations(timeout: 5)
+
+        let done = app.buttons["touchLayout.done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        done.tap()
+        XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
+        XCTAssertFalse(options.exists)
+
+        // Reopen and verify physical rotation rotates both sideways and upright freely.
+        reveal(arrange)
+        arrange.tap()
+        XCTAssertTrue(options.waitForExistence(timeout: 5))
         XCUIDevice.shared.orientation = .landscapeLeft
+        expectation(for: isLandscape, evaluatedWith: nil)
+        waitForExpectations(timeout: 5)
         XCUIDevice.shared.orientation = .portrait
-        XCTAssertGreaterThan(app.otherElements["touchLayout.editor"].firstMatch.frame.width,
-                             app.otherElements["touchLayout.editor"].firstMatch.frame.height)
+        expectation(for: isPortrait, evaluatedWith: nil)
+        waitForExpectations(timeout: 5)
+
         options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
         let exit = app.buttons["touchLayout.back"]
         XCTAssertTrue(exit.waitForExistence(timeout: 5))
         exit.tap()
         XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
         XCTAssertFalse(options.exists)
-        XCUIDevice.shared.orientation = .landscapeLeft
-        XCUIDevice.shared.orientation = .portrait
-        let portrait = NSPredicate { _, _ in self.app.frame.height > self.app.frame.width }
-        expectation(for: portrait, evaluatedWith: nil)
+        let appPortrait = NSPredicate { _, _ in self.app.frame.height > self.app.frame.width }
+        expectation(for: appPortrait, evaluatedWith: nil)
         waitForExpectations(timeout: 5)
     }
 
@@ -775,8 +815,8 @@ import XCTest
             XCTAssertTrue(action.label.hasPrefix(label))
             XCTAssertTrue(action.isHittable)
             XCTAssertEqual(action.frame.midY, baseline.midY, accuracy: 4)
-            XCTAssertGreaterThan(action.frame.width, app.frame.width * 0.6)
-            XCTAssertFalse(app.buttons["settings.open"].exists)
+            XCTAssertGreaterThan(action.frame.width, app.frame.width * 0.55)
+            XCTAssertTrue(app.buttons["settings.open"].isHittable)
         }
     }
 
@@ -798,7 +838,7 @@ import XCTest
         XCTAssertTrue(app.alerts.staticTexts["Play requested. The demo does not launch games."].exists)
         app.alerts.buttons["OK"].tap()
         launch("needs-update")
-        XCTAssertFalse(app.buttons["settings.open"].exists)
+        XCTAssertTrue(app.buttons["settings.open"].isHittable)
         XCTAssertTrue(app.buttons["state.action"].isHittable)
         app.buttons["state.action"].tap()
         XCTAssertTrue(app.buttons["help.done"].waitForExistence(timeout: 5))
@@ -812,8 +852,9 @@ import XCTest
             let tile = app.buttons["tile." + id]
             tile.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
             expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: tile)
-            expectation(for: NSPredicate(format: "exists == %@", NSNumber(value: playable)), evaluatedWith: app.buttons["settings.open"])
+            expectation(for: NSPredicate(format: "exists == true"), evaluatedWith: app.buttons["settings.open"])
             waitForExpectations(timeout: 5)
+            XCTAssertTrue(app.buttons["settings.open"].isHittable)
             XCTAssertEqual(app.buttons.matching(identifier: "state.action").count, 1)
             XCTAssertTrue(app.buttons["state.action"].label.hasPrefix(label))
             XCTAssertTrue(app.buttons["state.action"].isHittable)
@@ -1371,7 +1412,6 @@ import XCTest
 
         let backBtn = app.buttons["homeScreen.close"].firstMatch
         XCTAssertTrue(backBtn.waitForExistence(timeout: 5))
-        reveal(backBtn)
         backBtn.tap()
         XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
     }
@@ -1497,5 +1537,136 @@ import XCTest
         expectation(for: centredKeyPrev, evaluatedWith: nil)
         waitForExpectations(timeout: 5)
         XCTAssertEqual(prevKey.frame.midX, initialKeyX, accuracy: 4)
+    }
+
+    func testGameSettingsDownArrowScrollsPastInitialViewportToDeleteInPortraitAndLandscape() {
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            XCUIDevice.shared.orientation = orientation
+            extraArguments = ["--samples"]
+            launch("settings")
+            let topControl = app.segmentedControls["setting.DM_OPERATION_MODE"]
+            XCTAssertTrue(topControl.waitForExistence(timeout: 5) && topControl.isHittable)
+            let initialTopY = topControl.frame.midY
+            let deleteButton = app.buttons["set.delete"]
+            XCTAssertFalse(deleteButton.isHittable, "Delete button should start below the initial viewport (\(orientation))")
+
+            // Pressing down through the first few setting rows must scroll the Form itself (ForEach row IDs).
+            for _ in 0..<6 {
+                app.typeKey(.downArrow, modifierFlags: [])
+            }
+            if topControl.exists {
+                XCTAssertLessThan(topControl.frame.midY, initialTopY - 20,
+                                  "Down arrow across ForEach setting rows must scroll the Form upward (\(orientation))")
+            }
+
+            // Continue pressing down until the bottom Delete button scrolls into the viewport and becomes hittable.
+            for _ in 0..<20 {
+                if deleteButton.exists && deleteButton.isHittable { break }
+                app.typeKey(.downArrow, modifierFlags: [])
+            }
+            XCTAssertTrue(deleteButton.waitForExistence(timeout: 3) && deleteButton.isHittable,
+                          "Down arrow must scroll game settings past lazy Form rows to Delete game (\(orientation))")
+
+            // Pressing up must scroll all the way back to the first setting row.
+            for _ in 0..<24 {
+                if topControl.exists && topControl.isHittable { break }
+                app.typeKey(.upArrow, modifierFlags: [])
+            }
+            XCTAssertTrue(topControl.waitForExistence(timeout: 3) && topControl.isHittable,
+                          "Up arrow must scroll game settings back to the top row (\(orientation))")
+        }
+    }
+
+    func testEmptyLibraryGuideSecondaryEdgeSwipeAndTouchReset() {
+        XCUIDevice.shared.orientation = .portrait
+        launch("empty")
+        XCTAssertTrue(app.staticTexts["empty.guide"].waitForExistence(timeout: 5))
+        let openSettings = app.buttons["empty.openSettings"]
+        XCTAssertTrue(openSettings.waitForExistence(timeout: 5))
+        XCTAssertTrue(openSettings.isHittable)
+        openSettings.tap()
+        XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
+
+        // Verify touch layout editor options popover exposes Reset all controls.
+        let arrange = app.buttons["shellSettings.arrange"]
+        reveal(arrange)
+        arrange.tap()
+        let options = app.buttons["touchLayout.options"]
+        XCTAssertTrue(options.waitForExistence(timeout: 5))
+        options.tap()
+        let optionsScroll = app.scrollViews["touchLayout.options.scroll"].firstMatch
+        XCTAssertTrue(optionsScroll.waitForExistence(timeout: 5))
+        let resetAll = app.buttons["touchLayout.resetAll"]
+        for _ in 0..<4 where !resetAll.exists {
+            optionsScroll.swipeUp()
+        }
+        XCTAssertTrue(resetAll.exists)
+        app.buttons["touchLayout.back"].tap()
+
+        // Verify secondary game settings route supports iOS left-edge swipe back.
+        XCUIDevice.shared.orientation = .portrait
+        extraArguments = ["--samples"]
+        launch("settings")
+        let addBtn = app.buttons["set.homeScreen"].firstMatch
+        reveal(addBtn)
+        addBtn.tap()
+        let homeTitle = app.staticTexts["homeScreen.title"]
+        XCTAssertTrue(homeTitle.waitForExistence(timeout: 5))
+        let leftEdge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.45))
+        let rightTarget = app.coordinate(withNormalizedOffset: CGVector(dx: 0.80, dy: 0.45))
+        leftEdge.press(forDuration: 0.05, thenDragTo: rightTarget, withVelocity: .default, thenHoldForDuration: 0)
+        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
+        XCTAssertFalse(homeTitle.exists)
+    }
+
+    func testPerGameEnvOverrideShowsAndClearsOnManualChangeAndReset() {
+        extraArguments = ["--host", "--mock-env-override", "--select", "0100000000010000", "-AppleLanguages", "(en)"]
+        launch("settings")
+        let sheet = settingsScroll
+        let modeOverride = sheet.staticTexts["setting.DM_OPMODE.envOverride"]
+        let fpsOverride = sheet.staticTexts["setting.DM_SHOW_FPS.envOverride"]
+        let scaleOverride = sheet.staticTexts["setting.DM_RENDER_SCALE.envOverride"]
+        XCTAssertTrue(modeOverride.waitForExistence(timeout: 5))
+        XCTAssertEqual(modeOverride.label, "Set in this game’s env.txt")
+        XCTAssertTrue(fpsOverride.exists)
+        XCTAssertFalse(sheet.staticTexts["setting.DM_UPSCALER.envOverride"].exists)
+        XCTAssertTrue(scaleOverride.exists)
+        capture("env-override-en")
+
+        // Changing DM_OPMODE in the UI clears only its env.txt override mark (A5).
+        let mode = sheet.segmentedControls["setting.DM_OPMODE"]
+        XCTAssertTrue(mode.waitForExistence(timeout: 5))
+        mode.buttons["Docked"].tap()
+        XCTAssertTrue(modeOverride.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(fpsOverride.exists)
+        XCTAssertTrue(scaleOverride.exists)
+
+        // Reset to tested defaults clears all remaining env.txt override marks (A6).
+        let reset = app.buttons["set.reset"]
+        for _ in 0..<8 where !reset.isHittable {
+            sheet.swipeUp()
+        }
+        XCTAssertTrue(reset.isEnabled)
+        reset.tap()
+        expectation(for: NSPredicate(format: "isEnabled == false"), evaluatedWith: reset)
+        waitForExpectations(timeout: 5)
+        for _ in 0..<8 where !mode.isHittable {
+            sheet.swipeDown()
+        }
+        XCTAssertFalse(modeOverride.exists)
+        XCTAssertFalse(fpsOverride.exists)
+        XCTAssertFalse(scaleOverride.exists)
+    }
+
+    func testPerGameEnvOverrideLocalizedChineseScreenshot() {
+        extraArguments = ["--host", "--mock-env-override", "--select", "0100000000010000", "-AppleLanguages", "(zh-Hans)"]
+        launch("settings")
+        let sheet = settingsScroll
+        let modeOverride = sheet.staticTexts["setting.DM_OPMODE.envOverride"]
+        XCTAssertTrue(modeOverride.waitForExistence(timeout: 5))
+        XCTAssertEqual(modeOverride.label, "在这个游戏的 env.txt 中设置")
+        XCTAssertTrue(sheet.staticTexts["setting.DM_SHOW_FPS.envOverride"].exists)
+        XCTAssertTrue(sheet.staticTexts["setting.DM_RENDER_SCALE.envOverride"].exists)
+        capture("env-override-zh")
     }
 }

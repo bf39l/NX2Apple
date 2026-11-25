@@ -75,6 +75,7 @@ extension LauncherView {
             if running { toolsAge.cancelSingleRefreshProbe() }
         }
         .onChange(of: activeBuildID) { _ in library.invalidateArtworkStates() }
+        .onChange(of: buildQueue.entries) { _ in library.invalidateArtworkStates() }
         .onDisappear { toolsAge.cancelSingleRefreshProbe() }
         .allowsHitTesting(!editing)
         .overlay(alignment: .trailing) {
@@ -105,7 +106,7 @@ extension LauncherView {
                 ZStack {
                     ZStack {
                         if let game, let image = heroImage(for: game) {
-                            let state = library.artworkState(for: game, building: m.running && activeBuildID == game.id)
+                            let state = library.artworkState(for: game, building: isBuildingGame(game), queued: isQueuedGame(game))
                             ArtworkFill(image: image, focus: displayed(game).artwork.focus(for: .hero))
                                 .saturation(LibraryArtworkTone.saturation(muted: state.monochrome))   // sharp, never blurred (#1458)
                                 .id(game.id).transition(.opacity)
@@ -158,6 +159,11 @@ extension LauncherView {
                                 }
                             }
                             heroActions(game, compact: width < 760)
+                            if let generic = nxkitGenericBuild(game) {
+                                // built without a game profile (v0lumehi/nxkit#54): it may not start or render wrong, said every time
+                                NxkitGenericBuildRow(profile: generic.profile, reportURL: generic.report)
+                                    .frame(maxWidth: 620, alignment: .leading)
+                            }
                             if let prompt = nxkitLaunchPrompt(game) {
                                 // "Did it work?" after the first start of an app nxkit built, once (#1460)
                                 NxkitFeedbackRow(prompt: prompt) { m.markNxkitFeedbackAsked(prompt.id) }
@@ -209,6 +215,13 @@ extension LauncherView {
                                    gameVersion: app.version ?? "", nxkitVersion: record.version, engineBuild: record.hostBuild)
     }
 
+    /// An app nxkit built without a game profile (NxkitBuildProfile), and its prefilled report: only what this launcher knows.
+    func nxkitGenericBuild(_ game: LibraryGame) -> (profile: NxkitBuildProfile, report: URL)? {
+        guard let app = game.playableMacBundle, app.upstream == .nxkit, let profile = NxkitBuildProfile.read(app: game.appPath) else { return nil }
+        return (profile, NxkitFeedback.genericBuildReportURL(gameName: game.displayName(loc.lang), titleID: game.titleID, gameVersion: app.version ?? "",
+                                                             nxkitVersion: profile.nxkitVersion ?? m.nxkitRecord(game.titleID)?.version ?? ""))
+    }
+
     private func heroBadges(_ game: LibraryGame) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) { heroBadgeContent(game) }.fixedSize(horizontal: true, vertical: false)
@@ -218,7 +231,7 @@ extension LauncherView {
 
     @ViewBuilder private func heroBadgeContent(_ game: LibraryGame) -> some View {
         Group {
-            LibraryArtworkChip(state: library.artworkState(for: game, building: m.running && activeBuildID == game.id))
+            LibraryArtworkChip(state: library.artworkState(for: game, building: isBuildingGame(game), queued: isQueuedGame(game)))
             libraryMetadataBadges(game)
         }
     }
@@ -244,6 +257,7 @@ extension LauncherView {
                 LauncherGlassGroup {
                     HStack(spacing: 12) {
                         if !library.games.isEmpty { collectionBatchRefreshButton(compact: compactHeader) }
+                        activityLogButton()
                         Button(loc.t("supported.title"), action: openSupportedGames)
                             .buttonStyle(LauncherSecondaryButtonStyle())
                             .padTarget("library.supported", scope: "main", activate: openSupportedGames)
@@ -288,6 +302,78 @@ extension LauncherView {
         .padding(.horizontal, 34).padding(.top, 8).padding(.bottom, 22)
     }
 
+    static func tunedMetadataBadge(for game: LibraryGame, t: (String) -> String) -> LibraryGameCard.TunedBadge? {
+        LibraryGameCard.tunedBadge(
+            built: game.playableMacBundle?.upstream,
+            builtUpstreams: game.sortedMacBuilds.map(\.upstream),
+            available: EngineUpstream.tunedEngines(forTitleID: game.titleID),
+            t: t
+        )
+    }
+
+    var queuedLibraryTitleIDs: Set<String> {
+        Set(buildQueue.queued.map { $0.titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() })
+    }
+
+    func isBuildingGame(_ game: LibraryGame) -> Bool {
+        guard m.running else { return false }
+        if activeBuildID == game.id { return true }
+        if let running = buildQueue.running, running.titleID.caseInsensitiveCompare(game.titleID) == .orderedSame { return true }
+        if m.buildingGame, let buildingTitleID = m.gameTitleID, !buildingTitleID.isEmpty,
+           buildingTitleID.caseInsensitiveCompare(game.titleID) == .orderedSame { return true }
+        return false
+    }
+
+    func isQueuedGame(_ game: LibraryGame) -> Bool {
+        !isBuildingGame(game) && buildQueue.queued.contains { $0.titleID.caseInsensitiveCompare(game.titleID) == .orderedSame }
+    }
+
+    func effectiveLibraryQueueTarget(for game: LibraryGame, selectedTarget: String? = nil, upstream: EngineUpstreamKind? = nil, supportsGenericNUP: Bool? = nil) -> String {
+        let baseTarget = selectedTarget ?? (m.isMacOnlyUpstreamSelected ? BuildTarget.mac : BuildTarget.normalized(m.target))
+        let resolvedUpstream = resolvedLibraryQueueUpstream(for: game, selectedTarget: baseTarget, activeUpstream: upstream ?? m.buildUpstream, supportsGenericNUP: supportsGenericNUP ?? MacNativeGamesBuilder.supportsGenericNUP(in: m.macNativeGamesPath))
+        return resolvedUpstream.buildsMacOnly ? BuildTarget.mac : baseTarget
+    }
+
+    private func resolvedLibraryQueueUpstream(for game: LibraryGame, selectedTarget: String, activeUpstream: EngineUpstreamKind, supportsGenericNUP: Bool) -> EngineUpstreamKind {
+        let isNUP = MacNativeGamesBuilder.isNUPInputPath(game.inputs[GameLibrary.folderInput]?.first)
+            || MacNativeGamesBuilder.isNUPInputPath(game.inputs["base"]?.first)
+        return BuildSelectedSheet.rowEngineTag(
+            for: game.titleID,
+            selectedTarget: selectedTarget,
+            activeUpstream: activeUpstream,
+            isNUP: isNUP,
+            supportsGenericNUP: supportsGenericNUP
+        ) ?? activeUpstream
+    }
+
+    /// Adds games to the build queue with the Builds page's target, upstream, and iOS delivery settings (#1112).
+    func enqueueBuilds(_ games: [LibraryGame]) {
+        let batch = UUID()
+        let upstream = m.buildUpstream
+        let selectedTarget = m.isMacOnlyUpstreamSelected ? BuildTarget.mac : BuildTarget.normalized(m.target)
+        let packagesSharedApp = !(devices.exportIPA && (devices.exportOneGame || devices.exportFramework))
+        let exportsFramework = devices.exportIPA && !devices.exportOneGame && devices.exportFramework
+        let supportsGenericNUP = MacNativeGamesBuilder.supportsGenericNUP(in: m.macNativeGamesPath)
+        let entries = games.compactMap { game -> QueueEntry? in
+            guard !isBuildingGame(game), game.hasQueueableSources else { return nil }
+            let rowUpstream = resolvedLibraryQueueUpstream(for: game, selectedTarget: selectedTarget, activeUpstream: upstream, supportsGenericNUP: supportsGenericNUP)
+            let effectiveTarget = rowUpstream.buildsMacOnly ? BuildTarget.mac : selectedTarget
+            guard buildQueue.canEnqueue(game.titleID, target: effectiveTarget) else { return nil }
+            let isIOS = effectiveTarget != BuildTarget.mac
+            let standaloneIOS = isIOS && rowUpstream.buildsIOSStandaloneOnly
+            return QueueEntry(
+                game: game,
+                engineID: stores.engineSync.selection.engineID,
+                target: effectiveTarget,
+                batch: batch,
+                packageAfter: !standaloneIOS && packagesSharedApp && isIOS,
+                exportIPA: standaloneIOS ? true : (isIOS && exportsFramework ? true : nil),
+                exportFramework: standaloneIOS ? false : (isIOS && exportsFramework ? true : nil)
+            )
+        }
+        buildQueue.enqueue(entries)
+    }
+
     func libraryMetadataBadges(_ game: LibraryGame) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 7) { metadataBadgeContent(game) }.fixedSize(horizontal: true, vertical: false)
@@ -298,10 +384,22 @@ extension LauncherView {
 
     @ViewBuilder private func metadataBadgeContent(_ game: LibraryGame) -> some View {
         Group {
-            if game.playableMacBundle?.upstream == .macNativeGames {   // built with MacNativeGames: a property, a quiet tag
-                DSTag(loc.t("library.chip.mng"), emphasized: true)
-                    .help(loc.t("library.mng.help"))
-                    .accessibilityLabel(loc.t("library.mng.help"))
+            if let played = heroPlayTime(for: game) {
+                DSTag(played)
+                    .help(loc.t("activity.totalTime"))
+                    .accessibilityLabel("\(loc.t("activity.totalTime")) \(played)")
+            }
+            if let badge = Self.tunedMetadataBadge(for: game, t: { loc.t($0) }) {
+                DSTag(badge.title, emphasized: true, width: badge.fixedWidth)
+                    .help(badge.help)
+                    .accessibilityLabel(badge.help)
+            }
+            if game.playableMacBundle?.upstream == .nxkit, NxkitBuildProfile.read(app: game.appPath) != nil {
+                // built without a game profile (v0lumehi/nxkit#54): a quiet tag, the row under the actions says what it means
+                DSTag(loc.t("nxkit.generic.badge"), emphasized: true)
+                    .help(loc.t("nxkit.generic.help"))
+                    .accessibilityLabel(loc.t("nxkit.generic.help"))
+                    .accessibilityIdentifier("hero.nxkitGeneric")
             }
             if GameFolder.profileIsSwitch2(game.titleID, engineRoot: EngineLayout.root(m.repo.path)) {   // #445
                 ArtworkStatusChip(title: loc.t("switch2.badge"), color: LauncherPalette.notice, showsIndicator: false)
@@ -318,6 +416,7 @@ extension LauncherView {
                 ArtworkStatusChip(title: loc.t("library.olderToolsShort"), color: ArtworkStatusChip.neutralColor, showsIndicator: false)
                     .help(loc.t("library.olderToolsHelp"))
             }
+            deviceFrameworkBadge(game)
         }
         .accessibilityElement(children: .contain)
     }

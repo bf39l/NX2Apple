@@ -16,6 +16,9 @@ extension BuildStore {
         queuedExportIPA = nil
         queuedExportOneGame = nil
         queuedExportFramework = nil
+        activeQueueEntryUpstream = nil
+        queuedIOSSeenShaders = nil
+        clearInstallRecovery(includeFastRefresh: true)
         runBuild()
     }
 
@@ -59,6 +62,8 @@ extension BuildStore {
             done = false
             return
         }
+        activeRunStartedAt = Date()
+        activeRunRebuiltShaders = false
         stopping = false
         stoppedByPlayer = false
         archiveGeneration &+= 1
@@ -76,17 +81,22 @@ extension BuildStore {
         let override = takeOverrideFlag()   // for this build only: the next one asks again
         installedOn = ""
         installedAppPath = ""
+        shellUpdatedOnDevice = false
         exportedIPAPath = ""
         if !deferShellPackaging {
             needsReplaceOldImgReminder = false
             updatedImgPath = ""
         }
         send = .idle
+        lastRunWasFastRefresh = false
+        installRecovery.lastFastRefresh = nil
+        activeBuildUpstream = buildUpstream
         mngRun = false
         s2armRun = false
         s2armEventsPath = ""
         nxkitRun = false
         nxkitFeedback = nil   // the last build's question goes with its result (#1460)
+        seedBuildPlan()
         if isMacNativeGamesSelected {
             startMacNativeGamesBuild()
             return
@@ -100,7 +110,7 @@ extension BuildStore {
             let tidHex = buildKey
             // The work folder is a cache of the game (a second build reuses its stages). The app is built in the output folder's `<id>_build` and placed beside it.
             let workDir = NxkitBuilder.workDirectory(root: nxkitWorkRoot, key: tidHex)
-            let appFolder = (outDir.isEmpty ? inputFolder : outDir) + "/" + tidHex + "_build"
+            let appFolder = nxnativeWorkDirectory(baseOut: outDir.isEmpty ? inputFolder : outDir, tidHex: tidHex, upstream: .nxkit)
             if cloudFolderCheck(appFolder) {
                 failure = BuildFailure(kind: .cloudFolder, gameName: nil, detail: appFolder)
                 fail(failureWhat(failure!))
@@ -118,7 +128,7 @@ extension BuildStore {
                 }
                 input = folder
             }
-            let macOutput = MacAppOutput(workDir: URL(fileURLWithPath: appFolder), key: tidHex, titleID: gameTitleID, preferred: macAppPath)
+            let macOutput = MacAppOutput(workDir: URL(fileURLWithPath: appFolder), key: tidHex, titleID: gameTitleID, upstream: .nxkit, preferred: macAppPath)
             oneGameIPAPath = ""
             macAppPath = ""
             effectiveWorkDir = workDir
@@ -133,18 +143,25 @@ extension BuildStore {
             startS2ArmBuild()
             return
         }
-        guard repo.isRepo else {
-            fail(repo.path.isEmpty ? t("msg.repoInvalidEmpty") : String(format: t("msg.repoInvalid"), shortPath(repo.path)))
-            return
+        let isVariant = isNxnativeVariantSelected
+        let engineRoot = activeNxnativeEngineRoot()
+        let capabilityDir = isVariant ? engineRoot : repo.path
+        if isVariant {
+            if let problem = validateNxnativeVariantBeforeBuild(engineRoot: engineRoot) {
+                fail(problem)
+                return
+            }
+        } else {
+            guard repo.isRepo else {
+                fail(repo.path.isEmpty ? t("msg.repoInvalidEmpty") : String(format: t("msg.repoInvalid"), shortPath(repo.path)))
+                return
+            }
         }
-        // Resolve the interpreter here if the dependency check has not landed yet. checkDeps()
-        // runs on a background queue and startBuild() can beat it — for a moment deps.pythonPath is
-        // empty, and the old fallback was Apple's /usr/bin/python3 (3.9), which the script then
-        // rejected with "require Python 3.12 or newer" whatever the machine actually had (#53).
-        let py = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
+        // Resolve the interpreter safely while rejecting stale cross-upstream caches and MNG's uv-python.
+        let py = resolveBuildPython()
         // engine/ is the only engine and is stale or missing (#214): make it, then start again
-        if EngineLayout.needsSyncBeforeBuild(repo.path) {
-            _ = engine.syncEngine { ok in
+        if !isVariant && EngineLayout.needsSyncBeforeBuild(repo.path) {
+            _ = self.engine.syncEngine { ok in
                 self.running = false
                 if ok && !EngineLayout.needsSyncBeforeBuild(self.repo.path) { self.runBuild() }
                 else { self.fail(String(format: self.t("msg.toolsOld"), "engine/ (python3 tools/engine.py sync, see the log)")) }
@@ -152,7 +169,7 @@ extension BuildStore {
             return
         }
         // The tools this app runs, before a build that takes an hour finds one missing at its last step (#87)
-        let missing = RepoLayout.missingTools(in: repo.path)
+        let missing = RepoLayout.missingTools(in: capabilityDir, for: isVariant ? buildUpstream : .nxnative)
         if !missing.isEmpty {
             fail(String(format: t("msg.toolsOld"), missing.joined(separator: ", ")))
             return
@@ -193,7 +210,7 @@ extension BuildStore {
             }
         }
         let tidHex = buildKey
-        let workDir = (outDir.isEmpty ? baseDir : outDir) + "/" + tidHex + "_build"
+        let workDir = nxnativeWorkDirectory(baseOut: outDir.isEmpty ? baseDir : outDir, tidHex: tidHex)
         // The build's signing step refuses the attributes a cloud folder adds, after the long steps: stop here instead.
         if cloudFolderCheck(workDir) {
             failure = BuildFailure(kind: .cloudFolder, gameName: nil, detail: workDir)
@@ -233,42 +250,64 @@ extension BuildStore {
         // option and would stop with "unrecognized arguments" (issue #5), so ask the script. Without
         // it the script's own default (<input>/<title ID>_build) is used and the archive step follows
         // whatever folder the build reports.
-        let hasWorkDir = RepoLayout.supportsWorkDir(repo.path)
+        let hasWorkDir = RepoLayout.supportsWorkDir(capabilityDir)
         if !hasWorkDir {
             say(t("msg.noWorkDir"))
         }
-        // A compressed dump (NSZ / XCZ) needs nsz in the interpreter the build runs under. It is not
-        // part of the dependency probe (most builds never see one), so install it here, once, only
-        // when such a file is actually selected — otherwise the build stops with "pip install nsz".
-        let compressed = ([basePath, updatePath] + dlcPaths).contains {
+        // A compressed dump (NSZ / XCZ) needs `nsz` either in `py` or as an `nsz` executable on PATH
+        // (`build_ipa_from_nsp.py:nsz_command`). Never run bare `pip install` against an externally managed
+        // interpreter (PEP 668): reuse BundledTools or an app-managed `nsz-venv` and prepend its bin dir to PATH.
+        // Inspect `staged` so auto-staged sibling updates/DLCs in .nsz/.xcz format also trigger nsz provisioning.
+        let compressed = staged.contains {
             let e = ($0 as NSString).pathExtension.lowercased()
             return e == "nsz" || e == "xcz"
         }
-        // nsz lives in a folder the launcher owns: an externally managed Python refuses pip install (#1500).
-        // Only a compressed input uses it, so other builds never see its packages on PYTHONPATH.
+        var extraNszBinDir: String? = nil
+        var needsAsyncManagedNszInstall = false
         if compressed {
-            let nszEnv = PythonPackages.environment(python: py, env: ["PATH": BuildCommands.toolPath(python: py),
-                                                                      "HOME": NSHomeDirectory()].merging(BundledTools.environment(for: py)) { $1 }, runner: runner)
-            if !Toolchain.runOK(py, ["-c", "import nsz"], env: ProcessInfo.processInfo.environment.merging(nszEnv) { $1 }) {
-                say(t("msg.installingNsz"))
-                let r = PythonPackages.installNsz(python: py, env: nszEnv, runner: runner) { @Sendable line in
-                    hop { self.append(line + "\n") }
+            let probeEnv = ProxyEnvironment.merged(into: [
+                "PATH": BuildCommands.toolPath(python: py),
+                "HOME": home,
+            ].merging(BundledTools.environment(for: py)) { $1 })
+            if !Toolchain.runOK(py, ["-c", "import nsz"], env: probeEnv, runner: runner) {
+                if let bundledPy = BundledTools.python(),
+                   bundledPy != py,
+                   Toolchain.runOK(bundledPy, ["-c", "import nsz"], env: ProxyEnvironment.merged(into: ["HOME": home].merging(BundledTools.environment(for: bundledPy)) { $1 }), runner: runner) {
+                    let bundledBin = (bundledPy as NSString).deletingLastPathComponent
+                    if FileManager.default.isExecutableFile(atPath: bundledBin + "/nsz") {
+                        extraNszBinDir = bundledBin
+                    }
                 }
-                if !r {
-                    fail(String(format: t("msg.nszFailed"), py))
-                    return
+                if extraNszBinDir == nil {
+                    // Pass a clean base environment (without `py`'s PYTHONHOME/PYTHONPATH) so `nsz-venv` is never contaminated.
+                    let cleanNszProbeEnv = ProxyEnvironment.merged(into: [
+                        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                        "HOME": home,
+                        "LANG": "en_US.UTF-8",
+                    ])
+                    if let ready = Toolchain.readyManagedNszTool(
+                        venvDir: Toolchain.nszVenvDir(home: home),
+                        environment: cleanNszProbeEnv,
+                        runner: runner
+                    ) {
+                        extraNszBinDir = ready.binDir
+                    } else {
+                        needsAsyncManagedNszInstall = true
+                    }
                 }
             }
         }
-        let engine = EngineLayout.root(repo.path)   // the checkout's engine/ (#214)
         // A game folder's files are not encrypted: the script ignores -k for it, and the launcher does not ask for the keys.
-        var args = [engine + "/" + RepoLayout.buildScript, inputDir] + (folder != nil ? [] : ["-k", keysPath]) + ["--progress", "json"]
+        var args = [engineRoot + "/" + RepoLayout.buildScript, inputDir] + (folder != nil ? [] : ["-k", keysPath])
+        if !isVariant || RepoLayout.supportsProgressJson(capabilityDir) {
+            args += ["--progress", "json"]
+        }
         if let selectedTitleID { args += ["--title-id", selectedTitleID] }
         // A small env file the pipeline copies into the app bundle (main.m sets one variable per line at boot). Only for an iPhone or
         // iPad build: the in-game menu's words in the launcher's language (GameMenuText, #1129), and the CPU decode of BC textures when
         // the player turned that compatibility switch on (a Mac app runs on this Mac's GPU, which always has BC support).
         var tempEnvURL: URL?
-        if target != BuildTarget.mac {
+        if target != BuildTarget.mac, (!isVariant || RepoLayout.supportsEnvFile(capabilityDir)) {
             let envURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nspb-env-\(UUID().uuidString).txt")
             do {
                 try GameMenuText.envFile(bcOnCPU: bcOnCPU, t).write(to: envURL, atomically: true, encoding: .utf8)
@@ -282,7 +321,7 @@ extension BuildStore {
         if hasWorkDir { args += ["--work-dir", workDir] }
         // The image of this game the other platform's build left (the iPhone build's games/<id>/romfs.img, the Mac app's): the
         // script takes it in place of extracting the RomFS again once it checks out as this version's (#708). A game folder is packed, not extracted.
-        if folder == nil, RepoLayout.supportsRomfsFrom(repo.path) {
+        if folder == nil, RepoLayout.supportsRomfsFrom(capabilityDir) {
             var reusable = RomFSArchive.reusableImages(root: outDir.isEmpty ? baseDir : outDir, key: tidHex)
             if let extImg = fastRefreshExternalImgPath, !reusable.contains(extImg), FileManager.default.fileExists(atPath: extImg) {
                 reusable.append(extImg)
@@ -290,19 +329,38 @@ extension BuildStore {
             for image in reusable { args += ["--romfs-from", image] }
         }
         let macApp = target == BuildTarget.mac
-        let macOutput = macApp ? MacAppOutput(workDir: URL(fileURLWithPath: workDir), key: tidHex, titleID: gameTitleID, preferred: macAppPath) : nil
+        let macOutput = macApp ? MacAppOutput(workDir: URL(fileURLWithPath: workDir), key: tidHex, titleID: gameTitleID, upstream: buildUpstream, preferred: macAppPath) : nil
         oneGameIPAPath = ""
         if exportsOneGame {
             // One game's own IPA with its game data inside (BuildStore+OneGame.swift, #540)
-            oneGameIPAPath = OneGameIPA.path(folder: outDir.isEmpty ? baseDir : outDir, titleID: tidHex)
-            args += OneGameIPA.arguments(ipa: oneGameIPAPath)
+            oneGameIPAPath = OneGameIPA.path(folder: outDir.isEmpty ? baseDir : outDir, titleID: tidHex, upstream: buildUpstream)
+            let variantBundleID = isVariant && RepoLayout.supportsBundleID(capabilityDir)
+                ? OneGameIPA.personalBundleID(titleID: tidHex, teamID: devices.signingTeam, upstream: buildUpstream)
+                : nil
+            args += OneGameIPA.arguments(ipa: oneGameIPAPath, bundleID: variantBundleID)
         } else if let macOutput {
             macAppPath = ""
             args += ["--platform", "mac-app", "-o", macOutput.builderURL.path]
-            if RepoLayout.supportsFallbackIcon(repo.path) { args += macFallbackIconArguments(tidHex) }
+            if isVariant, RepoLayout.supportsBundleID(capabilityDir),
+               let variantBundleID = buildUpstream.personalMacBundleID(titleID: tidHex) {
+                args += ["--bundle-id", variantBundleID]
+            }
+            if shouldPassSeenShaders(forTitleID: gameTitleID ?? tidHex) {
+                args += ["--seen-shaders"]
+                say(t("msg.seenShadersOn"))
+            }
+            if RepoLayout.supportsFallbackIcon(capabilityDir) { args += macFallbackIconArguments(tidHex) }
         } else {
             // Only the game's framework: the one shared app is made and signed after the script (installShell)
             args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
+        }
+        if !macApp, RepoLayout.supportsCheatDir(capabilityDir),
+           let activeCheatsDir = RepoLayout.existingCheatsDir(titleID: gameTitleID ?? tidHex, home: self.home) {
+            args += ["--cheat-dir", activeCheatsDir]
+        }
+        if !macApp, shouldPassIOSSeenShaders(forTitleID: gameTitleID ?? tidHex, requested: queuedIOSSeenShaders) {
+            args += ["--seen-shaders"]
+            say(t("msg.iosSeenShadersOn"))
         }
         // The archive step packs whatever folder the build reported, and without --work-dir that is the
         // script's default, which is the same workDir unless a separate output folder was chosen.
@@ -321,9 +379,123 @@ extension BuildStore {
         // 'NuGet-Migrations' + lstat("") == ENOENT before any project is read. NSTemporaryDirectory()
         // is the per-user temp folder whether or not the app's own environment carries one.
         var denv = toolEnvironment(python: py)
-        if compressed { denv = PythonPackages.environment(python: py, env: denv, runner: runner) }
+        if let extraNszBinDir, !extraNszBinDir.isEmpty {
+            let curPath = denv["PATH"] ?? BuildCommands.toolPath(python: py)
+            if !curPath.split(separator: ":").contains(Substring(extraNszBinDir)) {
+                denv["PATH"] = extraNszBinDir + ":" + curPath
+            }
+        }
         if !oneGameIPAPath.isEmpty { denv.merge(OneGameIPA.environment) { $1 } }
-        let launch = ProcessLaunch(executable: py, arguments: args, environment: denv, directory: engine, groupPython: py)
+
+        if needsAsyncManagedNszInstall {
+            let gen = archiveGeneration
+            let homeDir = home
+            let runner = self.runner
+            let cancel = installCancel
+            let installingNszMsg = t("msg.installingNsz")
+            let immutableArgs = args
+            let immutableEnv = denv
+            let immutableEnvCleanup = tempEnvURL
+            cancel.set(false)
+            installPhaseActive = true
+            beginExternalStage(name: installingNszMsg)
+            say(installingNszMsg)
+            let appendLine: @Sendable (String) -> Void = { [weak self] line in
+                hop {
+                    guard let self, self.archiveGeneration == gen, !self.stopping, !self.installCancel.value else { return }
+                    self.append(line + "\n")
+                }
+            }
+            Task.detached(priority: .userInitiated) { [weak self] in
+                var resolvedBinDir: String? = nil
+                var installFailure: NszInstallFailureKind? = nil
+
+                if !Toolchain.isExternallyManagedPython(py, home: homeDir) {
+                    let pipEnv = ProxyEnvironment.merged(into: [
+                        "PATH": BuildCommands.toolPath(python: py),
+                        "HOME": homeDir,
+                    ].merging(BundledTools.environment(for: py)) { $1 })
+                    final class DirectLog: @unchecked Sendable {
+                        private let lock = NSLock()
+                        var lines: [String] = []
+                        func add(_ l: String) { lock.lock(); lines.append(l); lock.unlock() }
+                        var text: String { lock.lock(); defer { lock.unlock() }; return lines.joined(separator: "\n") }
+                    }
+                    let directLog = DirectLog()
+                    let directOK = runner.runCaptured([py, "-m", "pip", "install", "nsz"], env: pipEnv) { @Sendable line in
+                        directLog.add(line)
+                        appendLine(line)
+                    }
+                    if directOK {
+                        resolvedBinDir = (py as NSString).deletingLastPathComponent
+                    } else if !cancel.value {
+                        let directKind = Toolchain.classifyNszInstallFailure(directLog.text)
+                        if directKind == .pep668 || directKind == .permissionDenied {
+                            switch Toolchain.ensureManagedNszTool(
+                                preferredPython: py,
+                                home: homeDir,
+                                runner: runner,
+                                cancel: cancel,
+                                onLine: appendLine
+                            ) {
+                            case .success(let tool):
+                                resolvedBinDir = tool.binDir
+                            case .failure(let err):
+                                installFailure = err
+                            }
+                        } else {
+                            installFailure = directKind
+                        }
+                    }
+                } else {
+                    switch Toolchain.ensureManagedNszTool(
+                        preferredPython: py,
+                        home: homeDir,
+                        runner: runner,
+                        cancel: cancel,
+                        onLine: appendLine
+                    ) {
+                    case .success(let tool):
+                        resolvedBinDir = tool.binDir
+                    case .failure(let err):
+                        installFailure = err
+                    }
+                }
+
+                let finalBinDir = resolvedBinDir
+                let finalFailure = installFailure
+                hop {
+                    guard let self, self.archiveGeneration == gen else {
+                        if let immutableEnvCleanup { try? FileManager.default.removeItem(at: immutableEnvCleanup) }
+                        return
+                    }
+                    self.installPhaseActive = false
+                    if self.stopping || self.installCancel.value {
+                        if let immutableEnvCleanup { try? FileManager.default.removeItem(at: immutableEnvCleanup) }
+                        self.finishStoppedExternalPrep()
+                        return
+                    }
+                    if let finalFailure {
+                        if let immutableEnvCleanup { try? FileManager.default.removeItem(at: immutableEnvCleanup) }
+                        self.fail(self.nszFailureMessage(finalFailure, python: py))
+                        return
+                    }
+                    self.finishExternalStage(name: installingNszMsg)
+                    var launchEnv = immutableEnv
+                    if let finalBinDir, !finalBinDir.isEmpty {
+                        let curPath = launchEnv["PATH"] ?? BuildCommands.toolPath(python: py)
+                        if !curPath.split(separator: ":").contains(Substring(finalBinDir)) {
+                            launchEnv["PATH"] = finalBinDir + ":" + curPath
+                        }
+                    }
+                    let launch = ProcessLaunch(executable: py, arguments: immutableArgs, environment: launchEnv, directory: engineRoot, groupPython: py)
+                    self.startBuildProcess(launch: launch, envCleanup: immutableEnvCleanup, macOutput: macOutput)
+                }
+            }
+            return
+        }
+
+        let launch = ProcessLaunch(executable: py, arguments: args, environment: denv, directory: engineRoot, groupPython: py)
         startBuildProcess(launch: launch, envCleanup: tempEnvURL, macOutput: macOutput)
     }
 
@@ -352,6 +524,7 @@ extension BuildStore {
                     self.stopping = false
                     self.resetProgress()
                     self.doneNote = self.t("msg.stopped")
+                    macOutput?.cleanupEmptyStagingDirectory()
                     self.cleanupStaging()
                     return
                 }
@@ -369,11 +542,36 @@ extension BuildStore {
                         let fw = ShellInstall.builtFramework(workDir: self.effectiveWorkDir)
                             ?? ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: key)
                         let tid = ShellInstall.titleID(ofFramework: fw)
-                        self.packArchive(workDir: self.effectiveWorkDir, titleID: tid) {
-                            if self.deferShellPackaging { self.deferShellPackage(framework: fw, titleID: tid, name: name, archive: $0) }
-                            else if self.exportsFramework { self.exportFrameworkBundle(framework: fw, titleID: tid, name: name) }
-                            else if self.exportsShell { self.exportShell(framework: fw, titleID: tid, name: name) }
-                            else { self.installShell(framework: fw, titleID: tid, name: name, archive: $0) }
+                        self.packArchiveWithOutcome(workDir: self.effectiveWorkDir, titleID: tid) { outcome in
+                            if self.deferShellPackaging {
+                                self.deferShellPackage(
+                                    framework: fw, titleID: tid, name: name, archive: outcome.archiveDir,
+                                    didUpdateImg: outcome.didUpdateImg, updatedImgPath: outcome.primaryImgPath
+                                )
+                            } else if self.exportsFramework {
+                                let exportNote = self.t("refreshDone.exportManualReason")
+                                self.needsReplaceOldImgReminder = outcome.didUpdateImg
+                                self.updatedImgPath = outcome.didUpdateImg ? outcome.primaryImgPath : ""
+                                let imgStatus: QueueEntryImgStatus = outcome.didUpdateImg
+                                    ? .manualReplace(imgPath: outcome.primaryImgPath, reason: exportNote)
+                                    : .unchanged
+                                self.queue?.updateImgStatus(entryID: self.activeQueuedEntryID, titleID: tid, imgStatus: imgStatus)
+                                self.exportFrameworkBundle(framework: fw, titleID: tid, name: name)
+                            } else if self.exportsShell {
+                                let exportNote = self.t("refreshDone.exportManualReason")
+                                self.needsReplaceOldImgReminder = outcome.didUpdateImg
+                                self.updatedImgPath = outcome.didUpdateImg ? outcome.primaryImgPath : ""
+                                let imgStatus: QueueEntryImgStatus = outcome.didUpdateImg
+                                    ? .manualReplace(imgPath: outcome.primaryImgPath, reason: exportNote)
+                                    : .unchanged
+                                self.queue?.updateImgStatus(entryID: self.activeQueuedEntryID, titleID: tid, imgStatus: imgStatus)
+                                self.exportShell(framework: fw, titleID: tid, name: name)
+                            } else {
+                                self.installShell(
+                                    framework: fw, titleID: tid, name: name, archive: outcome.archiveDir,
+                                    didUpdateImg: outcome.didUpdateImg, updatedImgPath: outcome.primaryImgPath
+                                )
+                            }
                         }
                     }
                 } else {
@@ -412,6 +610,7 @@ extension BuildStore {
                         }
                         self.noteFailure()
                     }
+                    macOutput?.cleanupEmptyStagingDirectory()
                     self.cleanupStaging()
                 }
             }
@@ -426,6 +625,7 @@ extension BuildStore {
             }, onExit: onExit)
         } catch {
             if let envCleanup { try? FileManager.default.removeItem(at: envCleanup) }
+            macOutput?.cleanupEmptyStagingDirectory()
             fail(String(format: t("msg.launchFailed"), error.localizedDescription))
         }
     }
@@ -452,11 +652,16 @@ extension BuildStore {
                     return placed
                 }.value
                 guard archiveGeneration == generation, !stopping else { return }
+                let builtTid = (gameTitleID?.isEmpty == false ? gameTitleID! : buildKey)
+                await injectMngSharedSaveConfigIfNeeded(app: app, titleID: builtTid)
+                guard archiveGeneration == generation, !stopping else { return }
                 macAppPath = app.path
+                BuiltUpstreamRegistry.record(appPath: app.path, titleID: builtTid, upstream: activeBuildUpstream, home: home)
                 say("✓ " + shortPath(app.path))
                 await preflight(app)
                 guard archiveGeneration == generation else { return }
                 done = true
+                completeOverallProgress()
                 doneNote = t("msg.macAppDone")
                 if nxkitRun { finishNxkitBuild(app: app) }   // BuildStore+Nxkit.swift: the game's record and "Did it work?"
                 running = false
@@ -471,73 +676,14 @@ extension BuildStore {
         }
     }
 
-    /// The build's last stage: the new app is opened once, hidden, so that macOS checks it now and not at the player's first
-    /// start (#1005, `MacPreflight`). Its end, whatever it is, leaves the build done: a failure is a line in the log and a
-    /// failed stage. Skipped when switched off in Settings, or when the app's launcher would start the game instead.
-    func preflight(_ app: URL) async {
-        guard let open = preflightApp, MacPreflight.enabled(defaults), preflightSupported(app) else { return }
-        operation?.kind = .verifyingFirstStart
-        let id = (stages.map(\.id).max() ?? 0) + 1
-        let started = Date()
-        stages.append(Stage(id: id, name: "preflight", state: .running, started: started))
-        say(t("msg.preflight"))
-        let error: Error?
-        if let run = runPreflight {
-            let check = Task { @MainActor in await run(app, preflightTimeout) }
-            error = await withTaskCancellationHandler {
-                await withCheckedContinuation { (c: CheckedContinuation<Error?, Never>) in
-                    let end: @MainActor (Error?) -> Void = { [weak self] e in
-                        guard let self, self.endPreflight != nil else { return }
-                        self.endPreflight = nil
-                        check.cancel()
-                        c.resume(returning: e)
-                    }
-                    endPreflight = { end($0) }
-                    Task { @MainActor in end(await check.value) }
-                }
-            } onCancel: {
-                check.cancel()
-            }
-        } else {
-            var timer: Task<Void, Never>?
-            error = await withCheckedContinuation { (c: CheckedContinuation<Error?, Never>) in
-                let end: @MainActor (Error?) -> Void = { [weak self] e in
-                    guard let self, self.endPreflight != nil else { return }   // once: the app quit, Stop, or the timeout
-                    self.endPreflight = nil
-                    c.resume(returning: e)
-                }
-                endPreflight = { end($0) }
-                let timeout = preflightTimeout
-                timer = Task {
-                    do { try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)) } catch { return }
-                    end(MacPreflight.Failure.timedOut)
-                }
-                open(app, end)
-            }
-            timer?.cancel()
-        }
-        guard let i = stages.firstIndex(where: { $0.id == id }) else { return }
-        if let error {
-            let why: String
-            switch error {
-            case MacPreflight.Failure.timedOut: why = String(format: t("msg.preflightTimedOut"), Int(preflightTimeout / 60))
-            case MacPreflight.Failure.stopped: why = t("msg.stopped")
-            default: why = error.localizedDescription
-            }
-            stages[i].state = .failed
-            stages[i].detail = why
-            say("✗ " + String(format: t("msg.preflightFailed"), why))
-        } else {
-            stages[i].state = .done
-            say("✓ " + String(format: t("msg.preflightDone"), Int(Date().timeIntervalSince(started).rounded())))
-        }
-    }
-
+    /// Runs `verifyShellDevice` before building.
     /// Looks the device up in `devicectl list devices` (in the background), then starts the build, or says how to pair it.
     package func verifyShellDevice(then resume: (() -> Void)? = nil) {
         buildingGame = true
         runningTarget = target
         beginOperation(.building, game: gameName, titleID: gameTitleID, destination: .target)
+        activeRunStartedAt = Date()
+        activeRunRebuiltShaders = false
         stopping = false
         stoppedByPlayer = false
         installPhaseActive = true
@@ -560,6 +706,8 @@ extension BuildStore {
                     self.fastRefreshExternalImgPath = nil
                     self.skipStaleCheckForQueuedEntry = false
                     self.stopping = false
+                    self.failure = nil
+                    self.clearInstallRecovery(includeFastRefresh: true)
                     self.doneNote = self.t("msg.stopped")
                     return
                 }
@@ -572,6 +720,9 @@ extension BuildStore {
                     self.skipStaleCheckForQueuedEntry = false
                     self.failure = BuildFailure(kind: .devicePairing, gameName: nil)
                     self.doneNote = String(format: self.t("shell.notPaired"), self.devices.deviceName(device))
+                    if let resume {
+                        self.setInstallRecovery(.resumeClosure(resume))
+                    }
                     return
                 }
                 self.shellDeviceChecked = true

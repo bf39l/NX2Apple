@@ -81,6 +81,65 @@ extension LibraryView {
                 if !gate.isSystemEcho { removeCert() }
             }
         }
+        if let loadCheats = o.onLoadCheatsAsync {
+            a.onLoadCheatsAsync = { @MainActor id in
+                await loadCheats(id)
+            }
+        }
+        if let importCheat = o.onImportCheatFile {
+            a.onImportCheatFile = { @MainActor id in
+                guard !gate.isSystemEcho else { return .cancelled }
+                return await importCheat(id)
+            }
+        }
+        a.onToggleCheatMaster = o.onToggleCheatMaster.map { toggle in
+            { id, on in echo() ? (o.onLoadCheats?(id) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")) : toggle(id, on) }
+        }
+        if let toggleMasterAsync = o.onToggleCheatMasterAsync {
+            a.onToggleCheatMasterAsync = { @MainActor id, on in
+                if gate.isSystemEcho {
+                    if let load = o.onLoadCheatsAsync { return await load(id) }
+                    return GameCheatsSnapshot(gameID: id, gameTitle: "")
+                }
+                return await toggleMasterAsync(id, on)
+            }
+        }
+        a.onToggleCheatEntry = o.onToggleCheatEntry.map { toggle in
+            { id, key, on in echo() ? (o.onLoadCheats?(id) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")) : toggle(id, key, on) }
+        }
+        if let toggleEntryAsync = o.onToggleCheatEntryAsync {
+            a.onToggleCheatEntryAsync = { @MainActor id, key, on in
+                if gate.isSystemEcho {
+                    if let load = o.onLoadCheatsAsync { return await load(id) }
+                    return GameCheatsSnapshot(gameID: id, gameTitle: "")
+                }
+                return await toggleEntryAsync(id, key, on)
+            }
+        }
+        a.onConfirmMismatchCheatImport = o.onConfirmMismatchCheatImport.map { confirm in
+            { id, token in echo() ? .cancelled : confirm(id, token) }
+        }
+        if let confirmAsync = o.onConfirmMismatchCheatImportAsync {
+            a.onConfirmMismatchCheatImportAsync = { @MainActor id, token in
+                guard !gate.isSystemEcho else { return .cancelled }
+                return await confirmAsync(id, token)
+            }
+        }
+        a.onCancelMismatchCheatImport = o.onCancelMismatchCheatImport.map { cancel in
+            { id in if !echo() { cancel(id) } }
+        }
+        a.onDismissCheatFuseAlert = o.onDismissCheatFuseAlert.map { dismiss in
+            { id in echo() ? (o.onLoadCheats?(id) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")) : dismiss(id) }
+        }
+        if let dismissAsync = o.onDismissCheatFuseAlertAsync {
+            a.onDismissCheatFuseAlertAsync = { @MainActor id in
+                if gate.isSystemEcho {
+                    if let load = o.onLoadCheatsAsync { return await load(id) }
+                    return GameCheatsSnapshot(gameID: id, gameTitle: "")
+                }
+                return await dismissAsync(id)
+            }
+        }
         return a
     }
     /// An action that did not come from a controller or key came from touch: hints and focus ring step back. False when
@@ -133,6 +192,19 @@ extension LibraryView {
     func openControllers() { guard !shellSettingsOpen else { return }; guard noteTouch() else { return }; retention.reset(); controllersOpen = true; focus.id = "ctl.close" }
     func openShellSettings() { guard noteTouch() else { return }; retention.reset(); shellSettingsOpen = true; focus.id = "shs.close" }
     func closeShellSettings() { guard !fromSystemEcho else { return }; shellSettingsOpen = false; retention.closed(.shellSettings, sheetStaysOpen: menuPresented); focus.id = settingsOpen ? "set.back" : "lib.shellSettings" }
+    func openActivityLog() { guard noteTouch() else { return }; retention.reset(); activityLogOpen = true; focus.id = "act.close" }
+    func closeActivityLog() { guard !fromSystemEcho else { return }; activityLogOpen = false; retention.closed(.activityLog, sheetStaysOpen: menuPresented); focus.id = settingsOpen ? "set.back" : "lib.activityLog" }
+    func selectFromActivityLog(_ id: String) {
+        guard !fromSystemEcho else { return }
+        activityLogOpen = false
+        shellSettingsOpen = false
+        controllersOpen = false
+        settingsOpen = false
+        retention.closed(.activityLog, sheetStaysOpen: false)
+        selectedID = id
+        actions.onSelect(id)
+        focus.id = "lib.tile.\(id)"
+    }
     /// Where the Options button opens the shell's settings: over the library and over a game's settings, never over another panel or dialog.
     static func optionsOpensShellSettings(under top: FocusLayer?) -> Bool { top == nil || top == .settings }
     func openTouchLayout(_ window: CGSize, _ insets: EdgeInsets) {
@@ -140,14 +212,14 @@ extension LibraryView {
         touchLayout = TouchLayoutEditorModel.forDevice(window: window, insets: insets)
         focus.id = "lay.options"
     }
-    func closeTouchLayout() { guard !fromSystemEcho else { return }; touchLayout = nil; focus.id = "shs.arrange" }
+    func closeTouchLayout() { guard !fromSystemEcho else { return }; touchLayout = nil; focus.id = "shs.arrange"; focusRefresh &+= 1 }
     func confirmTouchLayout() {
         guard !fromSystemEcho, let touchLayout, !touchLayout.invalidPlacement else { return }
         touchLayout.commit()
         closeTouchLayout()
     }
     func openHelp(_ id: String) { guard !fromSystemEcho else { return }; returnFocus = focus.id; helpGameID = id; focus.id = "help.done" }
-    func closeHelp() { guard !fromSystemEcho else { return }; helpGameID = nil; focus.id = returnFocus }
+    func closeHelp() { guard !fromSystemEcho else { return }; helpGameID = nil; focus.id = returnFocus; focusRefresh &+= 1 }
     func openRestoreBackup(_ id: String, label: String) {
         guard noteTouch() else { return }
         returnFocus = focus.id
@@ -159,6 +231,7 @@ extension LibraryView {
         guard !fromSystemEcho else { return }
         restoreBackupGameID = nil
         focus.id = returnFocus
+        focusRefresh &+= 1
     }
     func confirmRestoreBackup(_ id: String) {
         guard !fromSystemEcho else { return }
@@ -175,6 +248,19 @@ extension LibraryView {
         guard !fromSystemEcho else { return }
         homeScreenGameID = nil
         focus.id = returnFocus
+        focusRefresh &+= 1
+    }
+    func openCheats(_ id: String) {
+        guard noteTouch(), actions.supportsCheats else { return }
+        returnFocus = focus.id
+        cheatsGameID = id
+        focus.id = "cht.close"
+    }
+    func closeCheats() {
+        guard !fromSystemEcho else { return }
+        cheatsGameID = nil
+        focus.id = returnFocus
+        focusRefresh &+= 1
     }
     var activeCoverCrop: CoverCropSession? {
         coverCropInSheetSession ?? coverCropSession
@@ -198,6 +284,7 @@ extension LibraryView {
         coverCropSession = nil
         coverCropInSheetSession = nil
         focus.id = returnFocus
+        focusRefresh &+= 1
         actions.onSaveCustomCover?(gameID, jpegData)
     }
     func closeCoverCrop() {
@@ -205,6 +292,7 @@ extension LibraryView {
         coverCropSession = nil
         coverCropInSheetSession = nil
         focus.id = returnFocus
+        focusRefresh &+= 1
     }
     #if canImport(PhotosUI)
     func handlePickedCoverPhoto(_ item: PhotosPickerItem) {
@@ -250,18 +338,26 @@ extension LibraryView {
         .tint(ShellPalette.cream)
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled()
-        .modifier(ShellKeyboardNavigation(active: true) { handle($0, from: .keyboard) })
+        .alert(
+            Text(verbatim: noticeTitle),
+            isPresented: Binding(
+                get: { coverCropShowsNotice },
+                set: { if !$0 { onDismissNotice() } }
+            )
+        ) {
+            Button(noticeDismissTitle) { onDismissNotice() }
+        } message: {
+            Text(notice ?? "")
+        }
+        .modifier(ShellKeyboardNavigation(active: !coverCropShowsNotice) { handle($0, from: .keyboard) })
     }
     /// The question starts on Cancel, with the saves kept.
     func openDelete(_ id: String) { guard noteTouch() else { return }; returnFocus = focus.id; deleteSaves = false; deleteGameID = id; focus.id = "del.cancel" }
-    func closeDelete() { guard !fromSystemEcho else { return }; deleteGameID = nil; focus.id = returnFocus }
+    func closeDelete() { guard !fromSystemEcho else { return }; deleteGameID = nil; focus.id = returnFocus; focusRefresh &+= 1 }
     func confirmDelete(_ id: String) {
         guard !fromSystemEcho else { return }
         let saves = deleteSaves
-        deleteGameID = nil
-        settingsOpen = false
-        focus.id = nil
-        actions.onDeleteGame(id, saves)
+        handOffMenu { actions.onDeleteGame(id, saves) }
     }
     func openChoice(_ request: ChoiceRequest) {
         guard noteTouch() else { return }
@@ -275,6 +371,7 @@ extension LibraryView {
         choice = nil
         let prefix = request.gameID == ShellSettingsRows.gameID ? ShellSettingsRows.targetPrefix : request.gameID == TouchLayoutEditorView.gameID ? "lay.row." : "set.row."
         focus.id = prefix + request.row.id
+        focusRefresh &+= 1
     }
     func pickChoice(_ value: String) {
         guard noteTouch() else { return }
@@ -301,7 +398,7 @@ extension LibraryView {
         padMapping = PadMappingState(gameID: id)
         focus.id = "map.close"
     }
-    func closePadMapping() { guard !fromSystemEcho else { return }; padMapping = nil; focus.id = returnFocus }
+    func closePadMapping() { guard !fromSystemEcho else { return }; padMapping = nil; focus.id = returnFocus; focusRefresh &+= 1 }
     func openPadRow(_ row: String) {
         guard noteTouch() else { return }
         padMapping?.row = row
@@ -333,6 +430,46 @@ extension LibraryView {
         buttonTestOpen = false
         actions.onButtonTest(false)
         focus.id = "ctl.test"
+        focusRefresh &+= 1
+    }
+    /// Unconditionally reconciles secondary route state when NavigationStack pops via edge swipe or system back,
+    /// avoiding `fromSystemEcho` drops that would leave state desynced from the stack.
+    func clearSecondaryMenuRouteFromNavigationPop() {
+        if padMapping != nil {
+            padMapping = nil
+            focus.id = returnFocus
+            focusRefresh &+= 1
+        } else if buttonTestOpen {
+            buttonTestOpen = false
+            actions.onButtonTest(false)
+            focus.id = "ctl.test"
+            focusRefresh &+= 1
+        } else if let request = choice {
+            choice = nil
+            let prefix = request.gameID == ShellSettingsRows.gameID ? ShellSettingsRows.targetPrefix : request.gameID == TouchLayoutEditorView.gameID ? "lay.row." : "set.row."
+            focus.id = prefix + request.row.id
+            focusRefresh &+= 1
+        } else if helpGameID != nil {
+            helpGameID = nil
+            focus.id = returnFocus
+            focusRefresh &+= 1
+        } else if cheatsGameID != nil {
+            cheatsGameID = nil
+            focus.id = returnFocus
+            focusRefresh &+= 1
+        } else if restoreBackupGameID != nil {
+            restoreBackupGameID = nil
+            focus.id = returnFocus
+            focusRefresh &+= 1
+        } else if homeScreenGameID != nil {
+            homeScreenGameID = nil
+            focus.id = returnFocus
+            focusRefresh &+= 1
+        } else if deleteGameID != nil {
+            deleteGameID = nil
+            focus.id = returnFocus
+            focusRefresh &+= 1
+        }
     }
     func back() {
         guard !fromSystemEcho else { return }
@@ -342,12 +479,17 @@ extension LibraryView {
         else if padMapping != nil { closePadMapping() }
         else if choice != nil { closeChoice() }
         else if let touchLayout {
-            if touchLayout.held { touchLayout.putDown() } else if touchLayout.confirmingExit { touchLayout.confirmingExit = false } else if touchLayout.requestExit() { closeTouchLayout() }
+            if touchLayout.held { touchLayout.putDown() }
+            else if touchLayout.confirmingReset { touchLayout.cancelReset() }
+            else if touchLayout.confirmingExit { touchLayout.confirmingExit = false }
+            else if touchLayout.requestExit() { closeTouchLayout() }
         }
         else if helpGameID != nil { closeHelp() }
+        else if cheatsGameID != nil { closeCheats() }
         else if restoreBackupGameID != nil { closeRestoreBackup() }
         else if homeScreenGameID != nil { closeHomeScreen() }
         else if deleteGameID != nil { closeDelete() }
+        else if activityLogOpen { closeActivityLog() }
         else if controllersOpen { controllersOpen = false; retention.closed(.controllers, sheetStaysOpen: menuPresented); focus.id = settingsOpen ? "set.back" : "lib.controllers" }
         else if shellSettingsOpen { closeShellSettings() }
         else if settingsOpen { closeSettings() }
@@ -371,7 +513,8 @@ extension LibraryView {
             }
         }
         let hadTileFocus = focus.id?.hasPrefix("lib.tile.") == true
-        if focus.id == nil || !activeTargets.contains(where: { $0.id == focus.id }) {
+        let settingsRowFocused = isKnownSettingsRowFocus(focus.id)
+        if focus.id == nil || (!activeTargets.contains(where: { $0.id == focus.id }) && !settingsRowFocused) {
             focus.id = defaultFocus
             if !Self.shouldDispatchWhenFocusMissing(action: action, topLayer: topLayer, hadTileFocus: hadTileFocus, isCoverFlow: layout.isCoverFlow, hasGames: !games.isEmpty) { return }
         }
@@ -439,6 +582,8 @@ extension LibraryView {
         if padMapping != nil { return .padMapping }
         if choice != nil { return .choice }
         if touchLayout != nil { return .touchLayout }
+        if cheatsGameID != nil { return .cheats }
+        if activityLogOpen { return .activityLog }
         if controllersOpen { return .controllers }
         if shellSettingsOpen { return .shellSettings }
         if helpGameID != nil { return .help }
@@ -448,11 +593,48 @@ extension LibraryView {
         if settingsOpen { return .settings }
         return nil
     }
+    var orderedSettingsRowIDs: [String] {
+        guard topLayer == .settings, let selected else { return [] }
+        return GameDetailView.orderedFocusRowIDs(
+            detail: selected,
+            showsCheats: actions.supportsCheats,
+            showsHomeScreen: actions.supportsHomeScreen,
+            showsChangeCover: actions.supportsCustomCover,
+            showsDelete: true
+        )
+    }
+    func isKnownSettingsRowFocus(_ id: String?) -> Bool {
+        guard topLayer == .settings, let id, id.hasPrefix("set.") else { return false }
+        if id == "set.back" || id == "set.play" { return false }
+        return orderedSettingsRowIDs.contains(GameDetailView.focusRowID(for: id))
+    }
     func move(_ action: ShellInput.Action) {
         let candidates = layout.isCoverFlow
             ? activeTargets.filter { !$0.id.hasPrefix("lib.tile.") || $0.id == "lib.tile.\(selected?.id ?? "")" }
             : activeTargets
-        focus.id = FocusNavigation.next(from: focus.id, action: action, targets: candidates)
+        let current = focus.id
+        if topLayer == .settings, (action == .down || action == .up) {
+            let ordered = orderedSettingsRowIDs
+            let originPresent = current.map { id in candidates.contains { $0.id == id } } ?? false
+            if !originPresent {
+                if let stepped = GameDetailView.fallbackVerticalTarget(from: current, action: action, orderedRows: ordered) {
+                    focus.id = stepped
+                    return
+                }
+            } else {
+                let next = FocusNavigation.next(from: current, action: action, targets: candidates)
+                if next != current {
+                    focus.id = next
+                    return
+                }
+                if let stepped = GameDetailView.fallbackVerticalTarget(from: current, action: action, orderedRows: ordered) {
+                    focus.id = stepped
+                    return
+                }
+                return
+            }
+        }
+        focus.id = FocusNavigation.next(from: current, action: action, targets: candidates)
         if let id = focus.id, id.hasPrefix("lib.tile.") { select(String(id.dropFirst("lib.tile.".count))) }
     }
     var defaultFocus: String? {
@@ -462,12 +644,14 @@ extension LibraryView {
         if let choice { return "pick." + choice.row.value }
         if touchLayout != nil { return activeTargets.contains { $0.id == "lay.done" } ? "lay.done" : "lay.options" }
         if helpGameID != nil { return "help.done" }
+        if cheatsGameID != nil { return "cht.close" }
         if restoreBackupGameID != nil { return "rst.cancel" }
         if homeScreenGameID != nil { return "hsc.save" }
         if deleteGameID != nil { return "del.cancel" }
+        if activityLogOpen { return "act.close" }
         if controllersOpen { return "ctl.close" }
         if shellSettingsOpen { return "shs.close" }
         if settingsOpen { return "set.back" }
-        return selected.map { "lib.tile.\($0.id)" } ?? "lib.controllers"
+        return selected.map { "lib.tile.\($0.id)" } ?? "lib.empty.settings"
     }
 }

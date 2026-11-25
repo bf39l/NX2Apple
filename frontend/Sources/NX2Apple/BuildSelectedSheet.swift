@@ -18,14 +18,39 @@ struct BuildSelectedSheet: View {
     /// The selected engine makes Mac apps only (nxkit, MacNativeGames): its note. The sheet then builds for the Mac only and offers
     /// no iPhone or iPad target. nil for an engine that builds both.
     var macOnlyNoteKey: String? = nil
+    /// Whether the launcher currently has MacNativeGames selected as the active build engine.
+    var macNativeGamesSelected: Bool = false
+    /// Whether the installed MacNativeGames checkout supports generic Switch 2 `.nup` routing (`tools/nup_input.py`).
+    var mngSupportsGenericNUP: Bool = false
+    /// Whether the installed MacNativeGames checkout contains #2375 shared `DM_SAVE` support for the 5 unified-builder titles.
+    var mngSupportsSharedSave: Bool = false
+    /// Active build engine selected on the Builds page (when nil, falls back to `macNativeGamesSelected`).
+    var activeUpstream: EngineUpstreamKind? = nil
+    var revealSaveTarget: (MacNativeGamesSaveEngine.SaveTarget) -> Void = MacNativeGamesSaveFinder.reveal
     var added: (String) -> Void = { _ in }
     let close: () -> Void
     @EnvironmentObject var loc: Localizer
     @State private var selectedTarget = BuildTarget.mac
+    @State private var showTunedOnly = false
     @State private var checked: Set<UUID> = []
     @State private var icons: [UUID: NSImage] = [:]
     @EnvironmentObject private var focus: PadFocus
 
+    private var effectiveUpstream: EngineUpstreamKind {
+        activeUpstream ?? (macNativeGamesSelected ? .macNativeGames : .nxnative)
+    }
+    private func isNUPInput(_ game: LibraryGame) -> Bool {
+        MacNativeGamesBuilder.isNUPInputPath(game.inputs[GameLibrary.folderInput]?.first)
+            || MacNativeGamesBuilder.isNUPInputPath(game.inputs["base"]?.first)
+    }
+    private func hasCompatibleTunedEngine(_ game: LibraryGame) -> Bool {
+        !Self.rowAvailableTunedEngines(
+            for: game.titleID,
+            activeUpstream: .nxnative,
+            isNUP: isNUPInput(game),
+            supportsGenericNUP: mngSupportsGenericNUP
+        ).isEmpty
+    }
     private func available(_ game: LibraryGame) -> Bool { targets.contains { queue.canEnqueue(game.titleID, target: $0) } }
     private var canAdd: Bool { candidates.contains { checked.contains($0.id) && available($0) } }
     private var sourceGames: [LibraryGame] { library.games.filter { $0.inputs[GameLibrary.folderInput] != nil || !($0.inputs["base"] ?? []).isEmpty } }
@@ -35,7 +60,12 @@ struct BuildSelectedSheet: View {
         return loc.lang.code + "\n" + entries.joined(separator: "\n")
     }
 
-    private var candidates: [LibraryGame] { sourceGames.filter(available) }
+    private var allCandidates: [LibraryGame] { sourceGames.filter(available) }
+    private var tunedCandidatesCount: Int { allCandidates.filter(hasCompatibleTunedEngine).count }
+    private var candidates: [LibraryGame] {
+        guard showTunedOnly, tunedCandidatesCount > 0 else { return allCandidates }
+        return allCandidates.filter(hasCompatibleTunedEngine)
+    }
 
     var body: some View {
         DSScrollingSheet(width: 680, height: min(720, (NSScreen.main?.visibleFrame.height ?? 800) - 80),
@@ -57,6 +87,20 @@ struct BuildSelectedSheet: View {
             if let macOnlyNoteKey {
                 Text(loc.t(macOnlyNoteKey)).font(DS.Font.callout).foregroundStyle(DS.Color.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if effectiveUpstream == .macNativeGames {
+                mngSaveBanner
+            }
+            if tunedCandidatesCount > 0 {
+                LauncherSegmented(
+                    options: [
+                        ("all", loc.t("console.filter.all")),
+                        ("tuned", "\(loc.t("library.chip.tuned")) (\(tunedCandidatesCount))")
+                    ],
+                    selection: showTunedOnly ? "tuned" : "all"
+                ) { showTunedOnly = $0 == "tuned" }
+                .compactFrame(minWidth: 240)
+                .padTarget("batch.filter", scope: "batch", activate: { showTunedOnly.toggle() }, adjust: { showTunedOnly = $0 > 0 })
             }
             if candidates.isEmpty {
                 Text(loc.t(sourceGames.isEmpty ? "queue.selectEmpty" : "queue.noApplicable")).font(DS.Font.body).foregroundStyle(DS.Color.textSecondary)
@@ -126,9 +170,45 @@ struct BuildSelectedSheet: View {
         }
     }
 
+    /// The engine tag shown for a row when MacNativeGames is the active launcher engine.
+    /// Returns nil when another engine is active so standard nxnative batch builds stay uncluttered.
+    static func rowEngineTag(for titleID: String, selectedTarget: String, macNativeGamesSelected: Bool, isNUP: Bool = false, supportsGenericNUP: Bool = false) -> EngineUpstreamKind? {
+        guard macNativeGamesSelected, MacNativeGamesBuilder.featureEnabled else { return nil }
+        return rowEngineTag(for: titleID, selectedTarget: selectedTarget, activeUpstream: .macNativeGames, isNUP: isNUP, supportsGenericNUP: supportsGenericNUP)
+    }
+
+    /// Resolves the actual engine tag a row will build with when a specialized game-tuned engine is selected.
+    static func rowEngineTag(for titleID: String, selectedTarget: String, activeUpstream: EngineUpstreamKind, isNUP: Bool = false, supportsGenericNUP: Bool = false) -> EngineUpstreamKind? {
+        guard activeUpstream.group == .gameTuned else { return nil }
+        let buildsMac = selectedTarget == BuildTarget.mac || selectedTarget == "both"
+        if activeUpstream == .macNativeGames {
+            guard MacNativeGamesBuilder.featureEnabled else { return nil }
+            let allowed = MacNativeGamesBuilder.supportsTitleID(titleID)
+                && (!isNUP || supportsGenericNUP || MacNativeGamesBuilder.nupSupportedTitleIDs.contains(MacNativeGamesBuilder.normalizedHex16(titleID) ?? ""))
+            return (buildsMac && allowed) ? .macNativeGames : .nxnative
+        }
+        if activeUpstream.buildsMacOnly {
+            return (buildsMac && activeUpstream.supportsTitleID(titleID)) ? activeUpstream : .nxnative
+        }
+        return activeUpstream.supportsTitleID(titleID) ? activeUpstream : .nxnative
+    }
+
+    /// Lists available tuned engines for a row when building with a general engine.
+    static func rowAvailableTunedEngines(for titleID: String, activeUpstream: EngineUpstreamKind, isNUP: Bool = false, supportsGenericNUP: Bool = false) -> [EngineUpstreamKind] {
+        guard activeUpstream.group == .general else { return [] }
+        return EngineUpstream.tunedEngines(forTitleID: titleID, macNativeGamesEnabled: MacNativeGamesBuilder.featureEnabled).filter { kind in
+            guard kind == .macNativeGames, isNUP, !supportsGenericNUP else { return true }
+            return MacNativeGamesBuilder.nupSupportedTitleIDs.contains(MacNativeGamesBuilder.normalizedHex16(titleID) ?? "")
+        }
+    }
+
     /// A game of the checklist: the check (the accent when chosen), its icon, its name and the platforms it already waits for.
     private func row(_ game: LibraryGame) -> some View {
         let on = checked.contains(game.id)
+        let isNUP = isNUPInput(game)
+        let upstream = effectiveUpstream
+        let availableTuned = Self.rowAvailableTunedEngines(for: game.titleID, activeUpstream: upstream, isNUP: isNUP, supportsGenericNUP: mngSupportsGenericNUP)
+        let engineTag = Self.rowEngineTag(for: game.titleID, selectedTarget: selectedTarget, activeUpstream: upstream, isNUP: isNUP, supportsGenericNUP: mngSupportsGenericNUP)
         return Button { toggle(game.id) } label: {
             HStack(spacing: DS.Space.s) {
                 Image(systemName: on ? "checkmark.square.fill" : "square").font(.system(size: 17))
@@ -144,7 +224,21 @@ struct BuildSelectedSheet: View {
                 .frame(width: DS.Control.thumbnail, height: DS.Control.thumbnail)
                 .clipShape(RoundedRectangle(cornerRadius: DS.Radius.chip))
                 .accessibilityHidden(true)
-                Text(game.displayName(loc.lang)).font(DS.Font.body).foregroundStyle(DS.Color.textPrimary).lineLimit(2).multilineTextAlignment(.leading)
+                VStack(alignment: .leading, spacing: DS.Space.xxs) {
+                    Text(game.displayName(loc.lang)).font(DS.Font.body).foregroundStyle(DS.Color.textPrimary).lineLimit(2).multilineTextAlignment(.leading)
+                    if let engineTag {
+                        DSTag(engineTag.displayName, emphasized: engineTag.group == .gameTuned, width: DSTag.engineWidth)
+                    } else if !availableTuned.isEmpty {
+                        let help = String(format: loc.t("library.tuned.help"), availableTuned.map(\.displayName).joined(separator: ", "))
+                        DSFlowRow(spacing: DS.Space.xs) {
+                            DSTag(loc.t("library.chip.tuned"), width: DSTag.engineWidth)
+                            ForEach(availableTuned, id: \.self) { engine in
+                                DSTag(engine.displayName, emphasized: true, width: DSTag.engineWidth)
+                            }
+                        }
+                        .help(help)
+                    }
+                }
                 Spacer(minLength: DS.Space.xs)
                 if let existing = queue.games.first(where: { $0.titleID.caseInsensitiveCompare(game.titleID) == .orderedSame }), existing.waiting || existing.running || existing.entries.contains(where: { $0.packagePending != nil }) {
                     BuildPlatformChip(targets: existing.entries.map(\.target))
@@ -164,6 +258,87 @@ struct BuildSelectedSheet: View {
     private var targets: [String] {
         Self.targets(selectedTarget, macOnly: macOnlyNoteKey != nil)
     }
+    enum MngSaveBannerMode: Equatable {
+        case shared
+        case external
+        case mixed
+    }
+
+    static func mngSaveBannerMode(mngSupportsSharedSave: Bool, titleIDs: [String]) -> MngSaveBannerMode {
+        guard mngSupportsSharedSave, !titleIDs.isEmpty else { return .external }
+        let sharedCount = titleIDs.filter { MngSharedSave.supportsTitleID($0) }.count
+        if sharedCount == titleIDs.count { return .shared }
+        if sharedCount > 0 { return .mixed }
+        return .external
+    }
+
+    private var mngCandidateGames: [LibraryGame] {
+        let isMNGCandidate: (LibraryGame) -> Bool = { game in
+            Self.rowEngineTag(
+                for: game.titleID,
+                selectedTarget: selectedTarget,
+                activeUpstream: .macNativeGames,
+                isNUP: isNUPInput(game),
+                supportsGenericNUP: mngSupportsGenericNUP
+            ) == .macNativeGames
+        }
+        let picked = candidates.filter { checked.contains($0.id) }
+        let mngPicked = picked.filter(isMNGCandidate)
+        if !mngPicked.isEmpty { return mngPicked }
+        return picked.isEmpty ? candidates.filter(isMNGCandidate) : []
+    }
+
+    private var mngTargetTitleID: String? {
+        mngCandidateGames.count == 1 ? mngCandidateGames[0].titleID : nil
+    }
+
+    private var mngSaveBanner: some View {
+        let mode = Self.mngSaveBannerMode(
+            mngSupportsSharedSave: mngSupportsSharedSave,
+            titleIDs: mngCandidateGames.map(\.titleID)
+        )
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let target: MacNativeGamesSaveEngine.SaveTarget = {
+            if mode == .shared {
+                if let tid = mngTargetTitleID {
+                    let saveURL = DmSaveEngine().defaultSave(titleID: tid, support: support)
+                    let reveal = FileManager.default.fileExists(atPath: saveURL.path) ? saveURL : saveURL.deletingLastPathComponent()
+                    return MacNativeGamesSaveEngine.SaveTarget(displaySaveURL: saveURL, revealURL: reveal)
+                }
+                let nxRoot = support.appendingPathComponent("nxnative", isDirectory: true)
+                return MacNativeGamesSaveEngine.SaveTarget(displaySaveURL: nxRoot, revealURL: FileManager.default.fileExists(atPath: nxRoot.path) ? nxRoot : support)
+            }
+            return MacNativeGamesSaveEngine.resolveSaveTarget(titleID: mngTargetTitleID, support: support)
+        }()
+        let noteKey: String = {
+            switch mode {
+            case .shared: return "mng.saves.sharedNote"
+            case .external: return "mng.saves.externalNote"
+            case .mixed: return "mng.saves.sharedMixedNote"
+            }
+        }()
+        return DSCard {
+            HStack(spacing: DS.Space.s) {
+                Image(systemName: "folder")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DS.Color.symbolDefault)
+                    .accessibilityHidden(true)
+                Text(loc.t(noteKey))
+                    .font(DS.Font.callout)
+                    .foregroundStyle(DS.Color.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: DS.Space.s)
+                Button(loc.t("savesloc.show")) {
+                    revealSaveTarget(target)
+                }
+                .buttonStyle(DSSecondaryButtonStyle())
+                .fixedSize()
+                .padTarget("batch.mngShowSaves", scope: "batch") {
+                    revealSaveTarget(target)
+                }
+            }
+        }
+    }
     static func targets(_ selection: String, macOnly: Bool) -> [String] {
         if macOnly { return [BuildTarget.mac] }
         return selection == "both" ? [BuildTarget.mac, BuildTarget.ios] : [selection]
@@ -180,12 +355,28 @@ struct BuildSelectedSheet: View {
     private func add() {
         guard canAdd else { return }
         let batch = UUID()
+        let upstream = effectiveUpstream
         queue.enqueue(candidates.filter { checked.contains($0.id) }.flatMap { game in
-            targets.map { target in
-                QueueEntry(game: game, engineID: engineID, target: target, batch: batch,
-                           packageAfter: packagesSharedApp && target != BuildTarget.mac,
-                           exportIPA: target != BuildTarget.mac && exportsFramework ? true : nil,
-                           exportFramework: target != BuildTarget.mac && exportsFramework ? true : nil)
+            let isNUP = isNUPInput(game)
+            return targets.map { target in
+                let isIOS = target != BuildTarget.mac
+                let rowUpstream = Self.rowEngineTag(
+                    for: game.titleID,
+                    selectedTarget: target,
+                    activeUpstream: upstream,
+                    isNUP: isNUP,
+                    supportsGenericNUP: mngSupportsGenericNUP
+                ) ?? upstream
+                let standaloneIOS = isIOS && rowUpstream.buildsIOSStandaloneOnly
+                return QueueEntry(
+                    game: game,
+                    engineID: engineID,
+                    target: target,
+                    batch: batch,
+                    packageAfter: !standaloneIOS && packagesSharedApp && isIOS,
+                    exportIPA: standaloneIOS ? true : (isIOS && exportsFramework ? true : nil),
+                    exportFramework: standaloneIOS ? false : (isIOS && exportsFramework ? true : nil)
+                )
             }
         })
         added(targets == [BuildTarget.mac] ? BuildTarget.mac : BuildTarget.ios)

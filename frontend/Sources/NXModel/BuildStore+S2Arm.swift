@@ -20,10 +20,10 @@ extension BuildStore {
             return
         }
         s2armRun = true
-        let initialPy = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
+        let initialPy = resolveBuildPython(includeS2Arm: true)
         let baseDir = inputFolder
         let tidHex = buildKey
-        let workDir = (outDir.isEmpty ? baseDir : outDir) + "/" + tidHex + "_build"
+        let workDir = nxnativeWorkDirectory(baseOut: outDir.isEmpty ? baseDir : outDir, tidHex: tidHex, upstream: .s2arm)
         if cloudFolderCheck(workDir) {
             failure = BuildFailure(kind: .cloudFolder, gameName: nil, detail: workDir)
             fail(failureWhat(failure!))
@@ -483,7 +483,7 @@ extension BuildStore {
                 let workDir = effectiveWorkDir.isEmpty ? (root as NSString).deletingLastPathComponent : effectiveWorkDir
                 let tid = gameTitleID ?? buildKey
                 let name = gameName
-                let macOutput = MacAppOutput(workDir: URL(fileURLWithPath: workDir), key: buildKey, titleID: gameTitleID, preferred: macAppPath)
+                let macOutput = MacAppOutput(workDir: URL(fileURLWithPath: workDir), key: buildKey, titleID: gameTitleID, upstream: .s2arm, preferred: macAppPath)
                 let tree = s2armPath
                 let upstreamsRoot = upstreamsRootURL
                 let homeDir = home
@@ -491,7 +491,15 @@ extension BuildStore {
                 archiveGeneration &+= 1
                 let gen = archiveGeneration
                 let packStageName = t("upstream.s2armPackingMacApp")
-                beginExternalStage(name: packStageName)
+                if let pendingIdx = stages.firstIndex(where: { $0.state == .pending && $0.id < 1000 && BuildPlan.canonicalKind(of: $0.name) == .macApp }) {
+                    stages[pendingIdx].name = packStageName
+                    stages[pendingIdx].state = .running
+                    stages[pendingIdx].started = Date()
+                    refreshOverallProgress(parsedTotal: nil)
+                } else {
+                    let nextScriptID = (stages.filter { $0.id > 0 && $0.id < 1000 }.map(\.id).max() ?? 0) + 1
+                    beginExternalStage(name: packStageName, scriptIndex: nextScriptID)
+                }
                 say(packStageName)
                 let cancel = installCancel
                 installCancel.set(false)

@@ -12,8 +12,10 @@ struct LauncherView: View {
     @ObservedObject var updates: AppUpdateStore   // the app's self-update: the update icon, the sheet, the uninstall dialog
     @ObservedObject private var repo: RepoStore   // the repository: the activity line, and the checks that follow a change of it
     @ObservedObject private var buildDependencies: DependencyStore
-    @ObservedObject private var buildQueue: BuildQueueStore
+    @ObservedObject var buildQueue: BuildQueueStore
     @ObservedObject private var engine: EngineSyncStore   // the engine: the sync banner, and the checks that follow a sync
+    @ObservedObject var playSessions: PlaySessionStore
+    @ObservedObject var librarySelection: LibrarySelectionStore
     @StateObject var library: GameLibrary
     @State var buildLogOpen = false
     @State var allBuildStepsOpen = false
@@ -39,28 +41,29 @@ struct LauncherView: View {
     @State var showGatekeeperHint = false
     @State var launchHintGeneration = 0
     @StateObject var cloudGate = CloudSaveGate()   // the check of the cloud's save before a start (CloudSaveGate.swift, #957)
+    @StateObject var mngMigration: MngSaveMigrationCoordinator
     @State var launchError: String?
-    @State private var removing: LibraryGame?
+    @State var removing: LibraryGame?
     @State private var selectingGames = false   // the Build selected games sheet (BuildSelectedSheet.swift)
     @State var batchRefreshOpen = false
     @State var missingImgGuideFor: MissingImgGuideContext?
-    @State private var deleting: LibraryGame?   // the game whose Delete sheet is open (DeleteGameSheet.swift)
+    @State var deleting: LibraryGame?   // the game whose Delete sheet is open (DeleteGameSheet.swift)
     @State var supportedGames: [SupportedGame]?   // the Supported games sheet is open when this is set (SupportedGamesSheet.swift)
+    @State var activityLogOpen = false
     @State var skippedItemsOpen = false
-    @State private var renaming: LibraryGame?   // the game whose Rename sheet is open (RenameGameSheet.swift)
+    @State var renaming: LibraryGame?   // the game whose Rename sheet is open (RenameGameSheet.swift)
     @State var optionsFor: UUID?
     @State private var controllerMappingOpen = false
     @State private var freeSpaceFor: UUID?   // the game whose Free space sheet is open
     @State private var controlsOpen = false
     @State private var controlsCancelRequest = 0   // the controller's B in the Controls sheet: asks to leave like Cancel
-    @State private var savesFor: UUID?   // the game whose Saves sheet is open (SaveTransfer.swift)
-    @State private var cheatsFor: UUID?  // the game whose Cheats sheet is open (CheatsView.swift)
+    @State var savesFor: UUID?   // the game whose Saves sheet is open (SaveTransfer.swift)
+    @State var cheatsFor: UUID?  // the game whose Cheats sheet is open (CheatsView.swift)
     @State var manageOpenFor: UUID?   // the game whose Manage menu is open (ManageMenu.swift)
     @State var artworkEditor: ArtworkEditor?   // the game whose artwork panel is open (ArtworkPanel.swift, LauncherView+Artwork.swift)
     @State var artworkSlot: ArtworkSlot?   // its tab: the part of the library not being edited dims
     @State var artworkPreview: GameArtwork?   // its draft, which the hero and the selected card draw instead of the saved artwork
     @State var previewGeneration = 0   // the latest preview decode: an older one that finishes late is dropped
-    @State var artworkFetchGeneration = 0   // the latest artwork language fetch: an older one that finishes late is dropped
     @State var artworkHeroAspect = ArtworkEditor.heroBandAspect   // the hero's proportions now, the band the panel frames for
     let artworkStore: ArtworkStore
     @StateObject var controls: ControlLayout
@@ -83,7 +86,7 @@ struct LauncherView: View {
          activeBuildID: UUID? = nil, performStartupChecks: Bool = true, search: String? = nil, olderTools: Set<UUID> = [],
          toolsAssessments: [UUID: GameRefreshAssessment] = [:],
          manageOpen: Bool = false, padRing: Bool = false, onRunSetup: (() -> Void)? = nil,
-         enterConsole: (() -> Void)? = nil, controllerDriver: AnyConsoleDriver? = nil, controls sharedControls: ControlLayout? = nil, recorder: BuildRecorder? = nil, qaPrompt: Bool = false, qaLaunching: Bool = false, qaSkippedOpen: Bool = false,
+         enterConsole: (() -> Void)? = nil, controllerDriver: AnyConsoleDriver? = nil, controls sharedControls: ControlLayout? = nil, recorder: BuildRecorder? = nil, qaPrompt: Bool = false, qaLaunching: Bool = false, qaSkippedOpen: Bool = false, qaActivityLogOpen: Bool = false,
          gamepad: LauncherGamepad? = nil, padFocus: PadFocus? = nil, dropdowns: LauncherDropdownState? = nil, artworkOpen: ArtworkSlot? = nil, artworkEditor: ArtworkEditor? = nil, artworkStore: ArtworkStore = .shared, completionDismissal: BuildCompletionDismissal? = nil, allGamesOpen: Bool = false, buildStep: Int = 0,
          gallery: LauncherGalleryState = LauncherGalleryState()) {
         _completionDismissal = StateObject(wrappedValue: completionDismissal ?? BuildCompletionDismissal())
@@ -91,6 +94,7 @@ struct LauncherView: View {
         _dropdowns = StateObject(wrappedValue: dropdowns ?? LauncherDropdownState())
         _consolePrompt = State(initialValue: qaPrompt)   // visual QA: the connect prompt open at launch
         _skippedItemsOpen = State(initialValue: qaSkippedOpen)
+        _activityLogOpen = State(initialValue: qaActivityLogOpen)
         _launching = State(initialValue: qaLaunching)
         _showGatekeeperHint = State(initialValue: qaLaunching)
         self.onRunSetup = onRunSetup
@@ -116,8 +120,8 @@ struct LauncherView: View {
         _updates = ObservedObject(wrappedValue: stores.appUpdates); _devices = ObservedObject(wrappedValue: stores.deviceStore)
         _buildDependencies = ObservedObject(wrappedValue: stores.dependencies)
         _buildQueue = ObservedObject(wrappedValue: stores.queue)
-        _repo = ObservedObject(wrappedValue: stores.repo); _engine = ObservedObject(wrappedValue: stores.engineSync)
-        let library = library ?? GameLibrary()
+        _repo = ObservedObject(wrappedValue: stores.repo); _engine = ObservedObject(wrappedValue: stores.engineSync); _playSessions = ObservedObject(wrappedValue: stores.playSessions); _librarySelection = ObservedObject(wrappedValue: stores.librarySelection)
+        let library = library ?? GameLibrary(defaults: stores.defaults)
         _library = StateObject(wrappedValue: library)
         _recorder = StateObject(wrappedValue: recorder ?? BuildRecorder(stores: stores, library: library, activeBuildID: activeBuildID))
         _page = State(initialValue: initialPage)
@@ -130,6 +134,7 @@ struct LauncherView: View {
         _resignNote = State(initialValue: gallery.resignNote)
         _buildLogOpen = State(initialValue: gallery.buildLogOpen)
         _signatures = StateObject(wrappedValue: SignatureTracker(expiry: gallery.signatureExpiry))
+        _mngMigration = StateObject(wrappedValue: MngSaveMigrationCoordinator(defaults: stores.defaults))
         _libraryFilter = State(initialValue: LibraryFilter.loadDesktop(stores.defaults))
         self.performStartupChecks = performStartupChecks
     }
@@ -156,7 +161,7 @@ struct LauncherView: View {
         guard filter != libraryFilter else { return }
         withAnimation(.easeInOut(duration: 0.2)) { libraryFilter = filter }
         filter.saveDesktop(stores.defaults)
-        let states = library.cachedArtworkStates(buildingID: activeBuildID)
+        let states = library.cachedArtworkStates(buildingID: activeBuildID, queuedTitleIDs: queuedLibraryTitleIDs)
         let after = filter.reconcile(
             games: library.games,
             selectedID: library.selectedID,
@@ -169,10 +174,11 @@ struct LauncherView: View {
         )
         if after.selectedID != library.selectedID { library.selectedID = after.selectedID }
         if after.focused != padFocus.focused { padFocus.focused = after.focused }
+        reconcilePinnedSelection(for: filter, states: states)
     }
 
     var filteredGames: [LibraryGame] {
-        let states = library.cachedArtworkStates(buildingID: activeBuildID)
+        let states = library.cachedArtworkStates(buildingID: activeBuildID, queuedTitleIDs: queuedLibraryTitleIDs)
         return libraryFilter.visibleGames(
             library.games,
             matching: search,
@@ -271,7 +277,7 @@ struct LauncherView: View {
                               if let game = library.games.first(where: { $0.titleID == titleID }), game.isReady, !launching { primaryAction(game) }
                           }, queuePlayEnabled: !launching, editingBuildResult: $editingBuildResult, onOpenSettings: { settingsCategory = .tools; page = .settings },
                           onChooseLibraryFolder: chooseLibraryFolder, onOpenControls: { controlsOpen = true }, onOpenControllers: { controllerSheet = true }, onRunSetup: onRunSetup, controlChanges: controls.changeCount,
-                          padMerge: Binding(get: { controls.padMerge }, set: { setPadMerge($0) }), buildFiles: stores.buildFiles, buildingID: m.running ? activeBuildID : nil, onBuildFileDetails: { freeSpaceFor = $0 }, settingsCategory: $settingsCategory)
+                          padMerge: Binding(get: { controls.padMerge }, set: { setPadMerge($0) }), buildFiles: stores.buildFiles, buildingID: m.running ? activeBuildID : nil, onBuildFileDetails: { freeSpaceFor = $0 }, seedCompression: stores.seedCompression, settingsCategory: $settingsCategory)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -319,7 +325,7 @@ struct LauncherView: View {
         .tint(LauncherPalette.accent)
         .font(DS.Font.body)   // the default for text without a font of its own
         .frame(minWidth: 900, idealWidth: 1280, minHeight: 680, idealHeight: 900)
-        .onDisappear { gamepad.deactivate() }
+        .onDisappear { gamepad.deactivate(); stores.seedAutoPromptHost.isReady = { false } }
         .onAppear {
             gamepad.perform = padAction
             gamepad.capture = { [consoleDriver] id, action in consoleDriver.consumePress(controllerID: id, isBack: action == .b) }
@@ -352,23 +358,27 @@ struct LauncherView: View {
                 updates.checkForUpdate(silent: true)
                 m.checkNxkitUpdate(manual: false)   // nxkit (Beta) updates itself from signed releases, with "Update automatically" on (#1460)
                 _ = m.checkUpstreamUpdates()
-                BuildNotifier.shared.watch(m, library: library)   // BuildNotifications.swift
+                BuildNotifier.shared.watch(m, library: library); runSeedCompressionStartupCheck()   // BuildNotifications.swift
             }
         }
         .onReceive(BuildNotifier.shared.$route) { route in   // a clicked build notification
             guard let route else { return }
             page = route.page
             if route.page == .builds { buildEditorOpen = true }
-            if let id = route.game { library.selectedID = id }
+            if let id = route.game {
+                if route.page == .library { showInLibrary(id) } else { library.selectedID = id }
+            }
             DispatchQueue.main.async { BuildNotifier.shared.route = nil }
         }
         .onChange(of: loc.lang) { _ in if performStartupChecks { fetchArtwork() } }   // the banners in the new language
         .onChange(of: library.games) { _ in
+            revalidatePinnedSelection()
             if performStartupChecks { library.syncSharedApp(root: m.shellCachePath, fallbackDevice: stores.deviceStore.installDevice) }
             refreshArtwork()
             readSignatures()
             if performStartupChecks { fetchArtwork(); library.fillMissingTitleNames() }
         }
+        .onReceive(library.played) { _ in librarySelection.clearPin() }
         .onChange(of: m.savedKeys) { _ in
             if performStartupChecks {
                 library.discover()
@@ -385,7 +395,7 @@ struct LauncherView: View {
         .onChange(of: repo.path) { _ in m.refreshUpstreamLocalVersion(for: .nxnative); refreshArtwork(); if performStartupChecks { checkTools(); library.fillMissingTitleNames() } }
         // A clone, pull or update check has finished (the automatic pull at launch among them): the checkout may have moved
         .onReceive(repo.$busy.removeDuplicates().dropFirst()) { busy in if !busy && performStartupChecks { checkTools() } }
-        .onReceive(engine.$syncing.removeDuplicates().dropFirst()) { syncing in if !syncing && performStartupChecks { checkTools() } }   // a sync made or moved the engine (its HEAD is what ToolsAge compares)
+        .onReceive(engine.$syncing.removeDuplicates().dropFirst()) { syncing in if !syncing && performStartupChecks { checkTools(); runSeedCompressionStartupCheck() } }   // a sync made or moved the engine (its HEAD is what ToolsAge compares)
         .onReceive(m.$running) { running in if running { editingBuildResult = false; completedFooterDismissed = false } }
         .onChange(of: library.selectedID) { _ in resignNote = nil }   // the last re-sign's note belongs to its game
         .onChange(of: heroGame?.id) { _ in profileHelpOpen = false; refreshHeroArtwork() }
@@ -420,8 +430,8 @@ struct LauncherView: View {
         }
         .sheet(isPresented: $controlsOpen) { ControlsView(layout: controls, cancelRequest: controlsCancelRequest).environmentObject(padFocus).launcherDropdownHost() }
         .sheet(isPresented: Binding(get: { freeSpaceFor != nil }, set: { if !$0 { freeSpaceFor = nil } })) {
-            if let id = freeSpaceFor, let game = BuildFiles.freeSpaceGame(id: id, in: library.games, store: stores.buildFiles) {
-                FreeSpaceView(m: m, game: game).environmentObject(padFocus)
+            if let id = freeSpaceFor, let target = BuildFiles.freeSpaceTarget(id: id, in: library.games, store: stores.buildFiles) {
+                FreeSpaceView(m: m, game: target.game, folder: target.folder).environmentObject(padFocus)
             }
         }
         .onChange(of: freeSpaceFor) { id in
@@ -440,17 +450,20 @@ struct LauncherView: View {
         }
         .buildFilesWiring(stores.buildFiles, library: library, build: m, recorded: recorder.recorded, buildingID: m.running ? activeBuildID : nil, pad: padFocus, scope: { currentPadScope })
         .cloudSaveSheet(cloudGate, pad: padFocus, scope: { currentPadScope })
+        .mngSaveMigrationSheet(mngMigration, saveSettings: stores.saveSettings, pad: padFocus, scope: { currentPadScope })
+        .onChange(of: stores.saveSettings.revision) { _ in syncMngSharedAppsLSEnvironment() }
+        .onReceive(recorder.recorded) { _ in promptMngMigrationAfterBuildIfNeeded() }
         .syncControllerLayouts(library: library, controls: controls)
         .deleteGameSheet($deleting, shellRoot: m.shellCachePath, library: library, loc: loc, pad: padFocus, scope: { currentPadScope })
         .libraryDiagnosticsWiring(library: library, repo: repo, engine: engine, verified: verifiedProfiles, skippedOpen: $skippedItemsOpen, pad: padFocus, scope: { currentPadScope }, openKeysSettings: openKeysSettingsFromDiagnostics)
         .sheet(isPresented: $selectingGames) {
-            BuildSelectedSheet(library: library, queue: stores.queue, engineID: engine.selection.engineID, target: m.target, packagesSharedApp: !m.exportsOneGame && !m.exportsFramework, exportsFramework: m.exportsFramework,
-                macOnlyNoteKey: m.isMacOnlyUpstreamSelected ? m.macOnlyNoteKey : nil,
+            BuildSelectedSheet(library: library, queue: stores.queue, engineID: engine.selection.engineID, target: m.target, packagesSharedApp: !(devices.exportIPA && (devices.exportOneGame || devices.exportFramework)), exportsFramework: devices.exportIPA && !devices.exportOneGame && devices.exportFramework,
+                macOnlyNoteKey: m.isMacOnlyUpstreamSelected ? m.macOnlyNoteKey : nil, macNativeGamesSelected: m.isMacNativeGamesSelected, mngSupportsGenericNUP: MacNativeGamesBuilder.supportsGenericNUP(in: m.macNativeGamesPath), mngSupportsSharedSave: m.isMacNativeGamesSharedSaveSupported, activeUpstream: m.buildUpstream,
                 added: { target in m.target = target; buildEditorOpen = true; page = .builds }) { selectingGames = false }
                 .environmentObject(loc).environmentObject(padFocus)
         }
         .refreshSheetsWiring(batchOpen: $batchRefreshOpen, imgGuide: $missingImgGuideFor, stores: stores, library: library, toolsAge: toolsAge, page: $page, buildEditorOpen: $buildEditorOpen, editingBuildResult: $editingBuildResult, buildStep: $buildStep, pad: padFocus, scope: { currentPadScope })
-        .shellCopySheetWiring(devices: devices, loc: loc, pad: padFocus, scope: { currentPadScope })
+        .shellCopySheetWiring(devices: devices, loc: loc, pad: padFocus, scope: { currentPadScope }).deviceFrameworkSyncWiring(devices: devices, library: library, build: m, performStartupChecks: performStartupChecks, checkTools: checkTools)
         .onChange(of: selectingGames) { _ in padFocus.scope = currentPadScope }
         .sheet(isPresented: Binding(get: { supportedGames != nil }, set: { if !$0 { supportedGames = nil } })) {
             SupportedGamesSheet(games: supportedGames ?? [], owned: { id in library.games.first { $0.titleID.uppercased() == id } },
@@ -460,7 +473,8 @@ struct LauncherView: View {
                 .environmentObject(padFocus)
         }
         .onChange(of: supportedGames == nil) { closed in padFocus.scope = closed ? currentPadScope : "supported" }
-        .renameGameSheet($renaming, library: library, pad: padFocus, scope: { currentPadScope })
+        .activityLogSheet(isPresented: $activityLogOpen, store: playSessions, library: library, artwork: artwork, loc: loc, pad: padFocus, scope: { currentPadScope }, showInLibrary: showInLibrary)
+        .renameGameSheet($renaming, library: library, pad: padFocus, scope: { currentPadScope }).seedCompressionSheet(stores.seedCompression, library: library, loc: loc, pad: padFocus, scope: { currentPadScope })
         .sheet(isPresented: $updates.showUpdateSheet) { UpdateSheet(updates: updates, build: m).environmentObject(padFocus) }
         .onChange(of: updates.showUpdateSheet) { _ in padFocus.scope = currentPadScope }
         .sheet(isPresented: Binding(get: { updates.uninstallPlan != nil }, set: { if !$0 { updates.uninstallPlan = nil } })) {
@@ -473,7 +487,12 @@ struct LauncherView: View {
             if let id = savesFor { SavesView(m: m, library: library, gameID: id).environmentObject(padFocus).launcherDropdownHost(dropdowns, pad: padFocus) }
         }
         .onChange(of: savesFor) { id in padFocus.scope = id != nil ? "saves" : currentPadScope }
-        .cheatsSheet(for: $cheatsFor, m: m, library: library, pad: padFocus) { currentPadScope }
+        .cheatsSheet(for: $cheatsFor, m: m, library: library, pad: padFocus, restoreScope: { currentPadScope }) {
+            page = .builds
+            buildEditorOpen = false
+            editingBuildResult = false
+            buildStep = 0
+        }
         .onChange(of: optionsFor) { id in
             if id == nil { controllerMappingOpen = false }
             padFocus.scope = currentPadScope
@@ -600,13 +619,6 @@ struct LauncherView: View {
         }
     }
 
-    /// Supported games > Show in library: the page, the filter and the selection go to that game.
-    func showInLibrary(_ id: UUID) {
-        page = .library
-        if let game = library.games.first(where: { $0.id == id }), !libraryFilter.includes(game) { setLibraryFilter(.owned) }
-        library.selectedID = id
-    }
-
     func newBuild() {
         buildEditorOpen = true
         guard !m.running else { page = .builds; return }
@@ -685,7 +697,7 @@ struct LauncherView: View {
             }
             return
         }
-        let sheetOpen = padFocus.scope != "main" || devices.shellCopy != nil || devices.shellWaiting || selectingGames || batchRefreshOpen || missingImgGuideFor != nil || controllerSheet || supportedGames != nil || skippedItemsOpen || optionsFor != nil || controlsOpen || savesFor != nil || cheatsFor != nil || freeSpaceFor != nil || stores.buildFiles.confirming != nil || deleting != nil || removing != nil || renaming != nil || artworkEditor != nil || cloudGate.isActive
+        let sheetOpen = padFocus.scope != "main" || stores.seedCompression.phase != nil || devices.shellCopy != nil || devices.shellWaiting || selectingGames || batchRefreshOpen || missingImgGuideFor != nil || controllerSheet || supportedGames != nil || activityLogOpen || skippedItemsOpen || optionsFor != nil || controlsOpen || savesFor != nil || cheatsFor != nil || freeSpaceFor != nil || stores.buildFiles.confirming != nil || deleting != nil || removing != nil || renaming != nil || artworkEditor != nil || cloudGate.isActive || mngMigration.isActive
         switch ManagePad.route(action, menuOpen: manageOpenFor != nil, sheetOpen: sheetOpen, hasGame: library.selected != nil && page == .library) {
         case .close: manageOpenFor = nil; return
         case .swallow: return
@@ -698,6 +710,7 @@ struct LauncherView: View {
         }
         if action == .b, padFocus.cancel() { return }
         if action == .b, padFocus.scope != currentPadScope { return }
+        if mngMigration.isActive && [.b, .x, .l, .r].contains(action) { if action == .b { mngMigration.cancel() }; return }
         if cloudGate.isActive && [.b, .x, .l, .r].contains(action) { if action == .b { cloudGate.cancel() }; return }
         if action == .b, controllerMappingOpen { controllerMappingOpen = false; return }
         if action == .b, controllerSheet { controllerSheet = false; return }
@@ -708,10 +721,9 @@ struct LauncherView: View {
         if freeSpaceFor != nil && [.b, .x, .l, .r].contains(action) { if action == .b { freeSpaceFor = nil }; return }
         if deleting != nil && [.b, .x, .l, .r].contains(action) { if action == .b { deleting = nil }; return }
         if supportedGames != nil && [.b, .x, .l, .r].contains(action) { if action == .b { supportedGames = nil }; return }
-        if skippedItemsOpen && [.b, .x, .l, .r].contains(action) {
-            if action == .b { skippedItemsOpen = false }
-            return
-        }
+        if activityLogOpen && [.b, .x, .l, .r].contains(action) { if action == .b { activityLogOpen = false }; return }
+        if stores.seedCompression.phase != nil && [.b, .x, .l, .r].contains(action) { if action == .b { handleSeedCompressionPadBack() }; return }
+        if skippedItemsOpen && [.b, .x, .l, .r].contains(action) { if action == .b { skippedItemsOpen = false }; return }
         if renaming != nil && [.b, .x, .l, .r].contains(action) { if action == .b { renaming = nil }; return }
         if action == .b {
             if devices.shellCopy != nil { devices.answerCopy(.skip) } else if devices.shellWaiting { devices.cancelWait() } else if batchRefreshOpen { batchRefreshOpen = false } else if missingImgGuideFor != nil { missingImgGuideFor = nil } else if optionsFor != nil { optionsFor = nil } else if controlsOpen { controlsCancelRequest += 1 }
@@ -750,23 +762,6 @@ struct LauncherView: View {
         }
     }
 
-    /// The Manage menu's rows for a game, wired to the launcher's sheets and actions (ManageItem.list).
-    private func manageItems(_ game: LibraryGame) -> [ManageItem] {
-        ManageItem.list(game: game, labels: loc.t, running: m.running, olderTools: toolsAge.older.contains(game.id), activeBuildID: activeBuildID,
-                        hasBuildFolder: BuildFolder.location(for: game) != nil,
-                        buildFilesTitle: BuildFiles.menuTitle(stores.buildFiles, game: game.id, t: loc.t),
-                        hasLog: GameLog.latest(titleID: game.titleID, appPath: game.appPath) != nil,
-                        deviceName: devices.deviceName(game.installedDevice), launching: launching,
-                        actions: ManageActions(
-                            rebuild: { configureBuild(game) }, openOnDevice: { openOnDevice(game) }, options: { optionsFor = game.id }, saves: { savesFor = game.id }, cheats: { cheatsFor = game.id },
-                            changeArtwork: { page = .library; openArtwork(game) }, rename: { renaming = game },
-                            reveal: { if let path = game.revealTarget { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } },
-                            showLog: { if let log = GameLog.latest(titleID: game.titleID, appPath: game.appPath) { GameLog.show(log) } },
-                            removeBuildFiles: { stores.buildFiles.ask(game.id, building: m.running && activeBuildID == game.id) }, remove: { removing = game }, delete: { deleting = game }))
-    }
-
-    private func manageItems(for game: LibraryGame?) -> [ManageItem] { game.map(manageItems) ?? [] }
-
     private func openKeysSettingsFromDiagnostics() {
         skippedItemsOpen = false
         page = .settings
@@ -775,7 +770,7 @@ struct LauncherView: View {
 
     /// The scope a controller acts in when no menu is open: the innermost sheet, else the window.
     private var currentPadScope: String {
-        dropdowns.custom != nil ? "engineDropdown" : (devices.shellCopy != nil || devices.shellWaiting) ? "shellCopy" : updates.showUpdateSheet ? "update" : updates.uninstallPlan != nil ? "uninstall" : cloudGate.isActive ? "cloudsave" : selectingGames ? "batch" : controllerSheet ? "console.controllers" : controllerMappingOpen ? "controls" : batchRefreshOpen ? "batchRefresh" : missingImgGuideFor != nil ? "imgGuide" : artworkEditor != nil ? "artwork" : savesFor != nil ? "saves" : cheatsFor != nil ? "cheats" : freeSpaceFor != nil ? "free" : stores.buildFiles.confirming != nil ? "buildfiles" : deleting != nil ? "delete" : removing != nil ? "remove" : skippedItemsOpen ? "skipped" : supportedGames != nil ? "supported" : renaming != nil ? "rename" : optionsFor != nil ? "launch" : controlsOpen ? "controls" : "main"
+        dropdowns.custom != nil ? "engineDropdown" : stores.seedCompression.phase != nil ? "seedCompress" : (devices.shellCopy != nil || devices.shellWaiting) ? "shellCopy" : updates.showUpdateSheet ? "update" : updates.uninstallPlan != nil ? "uninstall" : mngMigration.isActive ? "mngmigration" : cloudGate.isActive ? "cloudsave" : selectingGames ? "batch" : controllerSheet ? "console.controllers" : controllerMappingOpen ? "controls" : batchRefreshOpen ? "batchRefresh" : missingImgGuideFor != nil ? "imgGuide" : artworkEditor != nil ? "artwork" : savesFor != nil ? "saves" : cheatsFor != nil ? "cheats" : freeSpaceFor != nil ? "free" : stores.buildFiles.confirming != nil ? "buildfiles" : deleting != nil ? "delete" : removing != nil ? "remove" : skippedItemsOpen ? "skipped" : activityLogOpen ? "activity" : supportedGames != nil ? "supported" : renaming != nil ? "rename" : optionsFor != nil ? "launch" : controlsOpen ? "controls" : "main"
     }
 
     /// The space the collection row keeps around its cards for the focus ring (PadFocus draws it 4 pt outside a target).

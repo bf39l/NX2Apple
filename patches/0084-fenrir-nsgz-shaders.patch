@@ -1,0 +1,162 @@
+From 41a0f8599daaddfeec3476f6534a67634b4e83eb Mon Sep 17 00:00:00 2001
+From: bf39l <boliu1234@gmail.com>
+Date: Wed, 25 Nov 2026 15:47:37 +1300
+Subject: [PATCH] packing/shaders: read Fenrir NSGZ records
+
+Upstream-Status: pending
+Reason: Preserve the tested fork support while using the current upstream engine.
+Issue: local Valkyria Chronicles 4 1.0.1 shader split (0100C11009378000)
+
+---
+ dm/gfx/tools/shader_split.py      | 22 ++++++++++
+ dm/tools/tests/test_split_nsgz.py | 71 +++++++++++++++++++++++++++++++
+ docs/reference/shaders.md         |  8 ++++
+ 3 files changed, 101 insertions(+)
+ create mode 100644 dm/tools/tests/test_split_nsgz.py
+
+diff --git a/dm/gfx/tools/shader_split.py b/dm/gfx/tools/shader_split.py
+index f40787d..36c8149 100644
+--- a/dm/gfx/tools/shader_split.py
++++ b/dm/gfx/tools/shader_split.py
+@@ -30,6 +30,7 @@
+ #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
+ #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
+ #   · CRA (Camelot, Mario Tennis Fever): BNSH in the FSHA, VFXB and SARC members of the NARC containers in rom:/42, its files scrambled and listed only in the NRO the game decodes at run time, see cra.py and cra_jobs
++#   · HSPK (Sega Fenrir, Valkyria Chronicles 4): gzip-compressed BNSH in NSGZ records of the HSG shader package, see nsgz_shaders
+ #   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
+ #       NieR:Automata's DAT members instead prefix length-delimited NVN code and control sections with a binding table (pg_sized_shader)
+ #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
+@@ -4396,6 +4397,26 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
+             # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
+             # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
+             # that expands 9 times, which then added up to 18 times the file)
++def nsgz_shaders(d, label):
++    """Fenrir's HSPK packages and main embed NSGZ records: eight magic bytes, a u64 compressed length, then one gzip stream holding a BNSH."""
++    out, pos, left = [], 0, NEST * len(d)
++    while (pos := d.find(b'NSGZ    ', pos)) >= 0:
++        where = f'{label}#NSGZ@{pos:#x}'
++        size = field(d, '<Q', pos + 8, where)[0]
++        start, end = pos + 16, pos + 16 + size
++        if end > len(d): red(f'{where}: compressed data runs past the package')
++        stream = zlib.decompressobj(31)
++        try: member = stream.decompress(d[start:end], left + 1)
++        except zlib.error as e: red(f'{where}: invalid gzip stream ({e})')
++        left -= len(member)
++        if left < 0: red(f'{where}: decoded shaders exceed {NEST} times the package')
++        if not stream.eof or stream.unused_data: red(f'{where}: gzip stream does not match its record length')
++        if member[:8] != b'BNSH\0\0\0\0': red(f'{where}: decoded record is not BNSH')
++        if field(member, '<I', 0x1c, where)[0] != len(member): red(f'{where}: BNSH length does not match the decoded record')
++        out.extend(bnsh_shaders(member, 0, where))
++        pos = end
++    return out
++
+ VFS2 = b'VFS2'
+ VFS2_MAX = 16 << 20   # single GLSLC output upper bound; keeps corrupt/fuzz length prefixes within fuzzlib's allocation cap
+ _VFS2_INV = bytes(range(255, -1, -1))
+@@ -4556,6 +4577,7 @@ def scan_blob(d, label, out, depth=0, left=None):
+         for m in re.finditer(b'NDSR', d):
+             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
+         return
++    if b'NSGZ    ' in d: out.extend(nsgz_shaders(d, label))
+     for m in re.finditer(b'BNSH\0\0\0\0', d):
+         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
+         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
+diff --git a/dm/tools/tests/test_split_nsgz.py b/dm/tools/tests/test_split_nsgz.py
+new file mode 100644
+index 0000000..df8cd1e
+--- /dev/null
++++ b/dm/tools/tests/test_split_nsgz.py
+@@ -0,0 +1,71 @@
++"""Fenrir's gzip-wrapped BNSH records, using synthetic shaders only."""
++import gzip
++import struct
++import sys
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'fuzz'))
++import fuzz_shader_split as fz
++ss = fz.ss
++
++
++def record(data):
++    packed = gzip.compress(data, mtime=0)
++    return b'NSGZ    ' + struct.pack('<Q', len(packed)) + packed
++
++
++def package(*records):
++    return b'HSPK' + bytes(0x41c) + b''.join(records)
++
++
++class Nsgz(unittest.TestCase):
++    def scan(self, data):
++        out = []; ss.scan_blob(data, '/shader.hsg', out)
++        return out
++
++    def test_multiple_records(self):
++        out = self.scan(package(record(fz.bnsh()), bytes(32), record(fz.bnsh())))
++        self.assertEqual([s for _, s, _, _ in out], ['vs', 'ps', 'vs', 'ps'])
++        self.assertEqual([(c, b) for _, _, c, b in out], [fz.VS, fz.PS] * 2)
++        self.assertNotEqual(out[0][0], out[2][0])
++
++    def test_embedded_in_main(self):
++        out = self.scan(bytes(1024) + record(fz.bnsh()))
++        self.assertEqual([(c, b) for _, _, c, b in out], [fz.VS, fz.PS])
++
++    def test_nested_archive(self):
++        out = self.scan(fz.sarc([(b'shader.hsg', package(record(fz.bnsh())))]))
++        self.assertEqual([(c, b) for _, _, c, b in out], [fz.VS, fz.PS])
++
++    def test_truncated_header(self):
++        with self.assertRaises(SystemExit): self.scan(package(b'NSGZ    '))
++
++    def test_record_past_end(self):
++        with self.assertRaisesRegex(SystemExit, 'past the package'): self.scan(package(record(fz.bnsh()))[:-1])
++
++    def test_bad_gzip(self):
++        with self.assertRaisesRegex(SystemExit, 'invalid gzip'): self.scan(package(b'NSGZ    ' + struct.pack('<Q', 4) + b'bad!'))
++
++    def test_truncated_gzip(self):
++        r = record(fz.bnsh())
++        r = r[:8] + struct.pack('<Q', len(r) - 17) + r[16:-1]
++        with self.assertRaisesRegex(SystemExit, 'record length'): self.scan(package(r))
++
++    def test_trailing_gzip_data(self):
++        r = record(fz.bnsh())
++        r = r[:8] + struct.pack('<Q', len(r) - 15) + r[16:] + b'!'
++        with self.assertRaisesRegex(SystemExit, 'record length'): self.scan(package(r))
++
++    def test_wrong_payload(self):
++        with self.assertRaisesRegex(SystemExit, 'not BNSH'): self.scan(package(record(b'wrong')))
++
++    def test_wrong_bnsh_length(self):
++        d = bytearray(fz.bnsh()); struct.pack_into('<I', d, 0x1c, len(d) + 1)
++        with self.assertRaisesRegex(SystemExit, 'BNSH length'): self.scan(package(record(d)))
++
++    def test_expansion_bound(self):
++        with self.assertRaisesRegex(SystemExit, 'exceed 16 times'): self.scan(package(record(bytes(1 << 20))))
++
++
++if __name__ == '__main__': unittest.main()
+diff --git a/docs/reference/shaders.md b/docs/reference/shaders.md
+index ae86753..586a23c 100644
+--- a/docs/reference/shaders.md
++++ b/docs/reference/shaders.md
+@@ -482,6 +482,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
+ - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): 1,856 distinct keys (1,547 pixel, 309 vertex) in `shader.dat`, `shader2.dat` and `shadereff.dat` of `data000.cpk` (the split about 2.5 minutes); [Bayonetta](../../dm/games/010076F0049A2000/README.md): 458 distinct keys (236 pixel, 222 vertex), the members of `shader.dat` in `data00.cpk` (about 1.7 minutes). All build for both.
+ - **Not checked:** 13 Sentinels and Catherine: Full Body's CPKs (no files on the drives).
+ 
++### Gzip-wrapped BNSH records in Fenrir shader packages
++
++- **Symptom:** the shader split finds no shaders although the CRI CPK entries are readable and an HSG shader package starts with `HSPK`.
++- **Cause:** Fenrir stores its BNSH containers compressed: each `NSGZ    ` record has a 64-bit little-endian compressed length at +8 and one gzip stream at +16. Searching the stored package for BNSH magic cannot see them.
++- **Fix:** `shader_split.py` scans files and main for these records, bounds their compressed ranges and total decoded size, verifies the gzip stream and decoded BNSH length, then uses the existing BNSH reader. The record offset remains part of the source label.
++- **Found on:** Valkyria Chronicles 4, Japanese release `0100C11009378000`, version 1.0.1: `FENRIR_SHADER_NEW_NX64_.HSG` in `FEN_0000.CPK`, 6,712 NSGZ records (3,356 vertex and 3,356 pixel shaders), plus 158 records embedded in main. All 33 shaders captured during startup match the decoded main records byte for byte. A 30-second windowless startup reached frame 600 without missing shader captures. Gameplay and profile bring-up remain separate.
++- **Check:** `dm/tools/tests/test_split_nsgz.py` uses synthetic BNSH records for stage bytes, distinct source labels, truncated records, invalid or incomplete gzip streams, trailing bytes, invalid BNSH payloads and expansion bounds.
++
+ ### CRI CPK archives with the table of contents at the end
+ 
+ - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS` on a game whose RomFS is CRI CPK archives, with many `[RED] /<archive>.cpk/<file>: not CRILAYLA; not scanned` lines; entries the TOC lists as stored start with another file's bytes (`CRILAYLA`, `DXBC`, path or name text).
+-- 
+2.56.1
+

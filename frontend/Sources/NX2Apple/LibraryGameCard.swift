@@ -5,6 +5,52 @@ import NXModel
 import NXLauncher
 
 struct LibraryGameCard: View {
+    struct TunedBadge: Equatable {
+        let title: String
+        let help: String
+        let isBuilt: Bool
+        let fixedWidth: CGFloat?
+    }
+
+    static func tunedBadge(built: EngineUpstreamKind?, builtUpstreams: [EngineUpstreamKind] = [], available: [EngineUpstreamKind], t: (String) -> String) -> TunedBadge? {
+        if let built, builtUpstreams.count > 1 || built != .nxnative {
+            let help: String
+            if builtUpstreams.count > 1 {
+                let names = builtUpstreams.map(\.displayName).joined(separator: ", ")
+                help = String(format: t("library.engineBuiltSummary.help"), built.displayName, names)
+            } else if built.group == .gameTuned {
+                help = String(format: t("library.tunedBuilt.help"), built.displayName)
+            } else {
+                help = String(format: t("library.engineActive.help"), built.displayName)
+            }
+            return TunedBadge(
+                title: built.displayName,
+                help: help,
+                isBuilt: true,
+                fixedWidth: DSTag.engineWidth
+            )
+        }
+        if !available.isEmpty {
+            let names = available.map(\.displayName).joined(separator: ", ")
+            return TunedBadge(
+                title: t("library.chip.tunedAvailable"),
+                help: String(format: t("library.tuned.help"), names),
+                isBuilt: false,
+                fixedWidth: nil
+            )
+        }
+        return nil
+    }
+
+    static func tunedBadge(for state: LibraryArtworkState, t: (String) -> String) -> TunedBadge? {
+        tunedBadge(
+            built: state.mac ? state.macUpstream : nil,
+            builtUpstreams: state.builtMacUpstreams,
+            available: state.tunedEngines,
+            t: t
+        )
+    }
+
     let title: String
     let image: NSImage?
     let focus: UnitPoint
@@ -40,11 +86,17 @@ struct LibraryGameCard: View {
                 // the chip above the clip, inset from the top and leading edge, clear of the corner radius
                 .overlay(alignment: .topLeading) { LibraryArtworkChip(state: state).padding(DS.Interaction.chipInset) }
                 .overlay(alignment: .topTrailing) {
-                    // built with MacNativeGames: a property of the app, a quiet tag in the other corner
-                    if state.isMacNativeGames {
-                        DSTag(loc.t("library.chip.mng"), emphasized: true)
-                            .help(loc.t("library.mng.help"))
-                            .accessibilityLabel(loc.t("library.mng.help"))
+                    // Built with a game-tuned engine, or shows a unified pill when one or more tuned engines are available.
+                    if let badge = Self.tunedBadge(for: state, t: { loc.t($0) }) {
+                        DSTag(badge.title, emphasized: true, width: badge.fixedWidth)
+                            .help(badge.help)
+                            .accessibilityLabel(badge.help)
+                            .padding(DS.Interaction.chipInset)
+                    } else if state.isNxkitGeneric {
+                        // nxkit built it without a game profile (v0lumehi/nxkit#54): the same quiet tag in the same corner
+                        DSTag(loc.t("nxkit.generic.badge"), emphasized: true)
+                            .help(loc.t("nxkit.generic.help"))
+                            .accessibilityLabel(loc.t("nxkit.generic.help"))
                             .padding(DS.Interaction.chipInset)
                     }
                 }

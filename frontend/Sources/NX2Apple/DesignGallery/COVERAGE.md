@@ -4,13 +4,14 @@ Written by `GalleryCoverageTests` from `GalleryCoverage.swift`: every View type 
 popover and alert, every notice and every case of the state enums the views switch on, with the gallery's scenes
 (`GalleryScene.id`) that show it, or the reason none can. After a change:
 `NX_WRITE_COVERAGE=1 swift test --package-path frontend --filter GalleryCoverageTests`. The gallery has
-327 scenes.
+342 scenes.
 
-## Views: 221 of 231 in a scene
+## Views: 234 of 244 in a scene
 
 | View | Scenes |
 |---|---|
 | `ActionCard` | `addGameFound` |
+| `ActivityLogSheet` | `activityLog`, `activityLogEmpty` |
 | `AppCard` | `settings`, `desktop-appAvailable` |
 | `ArtworkFill` | `libraryGames`, `consoleHome` |
 | `ArtworkOutcomeBadge` | `desktop-queueEveryState` |
@@ -37,7 +38,6 @@ popover and alert, every notice and every case of the state enums the views swit
 | `BuildQueueCard` | `desktop-queueEveryState` |
 | `BuildQueueHero` | `desktop-queueRunning` |
 | `BuildSelectedSheet` | `buildSelected` |
-| `BuildUpNextSection` | `buildsQueued`, `desktop-queueRunning` |
 | `CacheFolderRow` | `settingsTools` |
 | `CardDisclosure` | `buildOneStage` |
 | `CardDivider` | `settings` |
@@ -47,9 +47,14 @@ popover and alert, every notice and every case of the state enums the views swit
 | `CardRow` | `settings` |
 | `ChangedDot` | `console-mappingCustom` |
 | `ChangedLabel` | `gameOptions` |
+| `CheatCapabilityTag` | `cheats` |
+| `CheatTriggerKeyPill` | `cheats` |
+| `CheatsCountPill` | `cheats` |
+| `CheatsOverviewCard` | `cheats` |
 | `CheatsView` | `cheats` |
 | `CloudSaveSheet` | `cloudChoose`, `cloudFetching` |
 | `CloudSavesCard` | `settingsLibrary`, `gameOptions` |
+| `CloudSyncConflictSheet` | `cloudSyncConflict` |
 | `ConsoleAdvancedList` | `console-advanced` |
 | `ConsoleAllGamesPage` | `consoleAllGames` |
 | `ConsoleArtColumn` | `consoleOptions` |
@@ -89,6 +94,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `ConsoleListRow` | `consoleBuilds` |
 | `ConsoleManagePanel` | `console-manage` |
 | `ConsoleMenuRow` | `console-menu` |
+| `ConsoleMngMigrationView` | `console-mngMigration` |
 | `ConsoleNoticeCard` | `consoleBuildsEmpty`, `consoleGameOverviewEmpty` |
 | `ConsoleOptionRow` | `consoleOptions` |
 | `ConsolePadDiagram` | `console-mappingCustom` |
@@ -111,6 +117,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `ConsoleSupportedGamesPage` | `console-supportedGames` |
 | `ConsoleSwitch` | `consoleOptions`, `console-mappingStandard` |
 | `ConsoleSwitchRow` | `consoleGameCheats` |
+| `ConsoleTag` | `consoleOptions`, `console-supportedGames` |
 | `ConsoleToastView` | `desktop-controllerToast`, `console-homeToast` |
 | `ConsoleToggleListRow` | `consoleControllers` |
 | `ConsoleValueStepper` | `consoleOptions` |
@@ -140,6 +147,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `EngineDropdownPanel` | `desktop-engineDropdown` |
 | `EngineExperimentalBadge` | `desktop-engineDropdown` |
 | `EngineFootnote` | Reason: Not used by the launcher: no view creates it, only tests host it. |
+| `EnginePlatformBadge` | `desktop-engineDropdown` |
 | `EngineSwitcherCard` | `buildsIdle`, `nxkitFailed`, `desktop-mngRecommend`, `desktop-mngRecommendInstalled` |
 | `EngineSyncBanner` | `libraryNoticeError`, `settingsEngineError` |
 | `ExportSteps` | `desktop-completionExported`, `desktop-sendSent` |
@@ -194,7 +202,9 @@ popover and alert, every notice and every case of the state enums the views swit
 | `ManageMenuPanel` | `desktop-manageMenu`, `desktop-manageMenuPad` |
 | `MissingImgGuideSheet` | `imgGuide` |
 | `MissingToolRow` | `desktop-missingTool` |
+| `MngSaveMigrationSheet` | `mngSaveMigration` |
 | `NxkitFeedbackRow` | `nxkitFinished`, `nxkitLibrary` |
+| `NxkitGenericBuildRow` | `nxkitGeneric` |
 | `OnboardingCheck` | `onboarding-done` |
 | `OnboardingDemoHost` | `onboarding-fresh` |
 | `OnboardingDropZone` | `onboarding-gamesEmpty` |
@@ -214,11 +224,14 @@ popover and alert, every notice and every case of the state enums the views swit
 | `Popped` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
 | `ProgressCard` | `buildsRunning`, `nxkitFailed` |
 | `QueueArtworkStack` | `desktop-queueRunning`, `buildsQueued` |
+| `RefreshCompletionSheet` | `refreshCompletion` |
 | `RefreshDevicesButton` | `wizardInstall` |
 | `RenameGameSheet` | `rename` |
 | `RootView` | Reason: The app's roots: they choose the onboarding, the launcher or the console demo, whose scenes show what they draw. |
 | `SaveImportSheet` | `saveImport` |
 | `SavesView` | `saves`, `desktop-savesReady` |
+| `SeedCompressionSettingsRow` | `settingsTools`, `desktop-seedCompressionStorage` |
+| `SeedCompressionSheet` | `seedCompressionPrompt`, `seedCompressionProgress`, `seedCompressionDone` |
 | `SendSelectedSheet` | `sendSelectedDevice`, `desktop-sendSelectedDrive` |
 | `SettingsPage` | `settings`, `settingsTools` |
 | `SettingsUpdateAction` | `desktop-appAvailable` |
@@ -242,7 +255,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `UpstreamPicker` | `nxkitEngine`, `desktop-mngBlocked` |
 | `UpstreamVersionPill` | `buildsIdle`, `desktop-engineDropdown` |
 
-## Presentations: 30 of 36 in a scene
+## Presentations: 33 of 39 in a scene
 
 | Presentation | Scenes |
 |---|---|
@@ -251,6 +264,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `BuildPage.swift .sheet BuildProcessStepsSheet` | `buildSteps` |
 | `BuildPage.swift .sheet LauncherConfirmSheet` | `confirmCancelDraft` |
 | `BuildPage.swift .sheet LauncherConfirmSheet 2` | `confirmCancelQueue` |
+| `CloudSavesCard.swift .sheet CloudSyncConflictSheet` | `cloudSyncConflict` |
 | `Controls.swift .sheet LauncherConfirmSheet` | `controlsDiscard` |
 | `EngineSwitcherCard.swift .popover EngineDropdownPanel` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
 | `ExportSteps.swift .sheet SendSelectedSheet` | `desktop-sendSelectedDrive` |
@@ -261,6 +275,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `LaunchOptionsView.swift .sheet GameControllerMappingView` | `desktop-controllerMapping` |
 | `LauncherDropdown.swift .popover LauncherDropdownList` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
 | `LauncherInfoHelp.swift .popover VStack` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
+| `LauncherView+SeedCompression.swift .sheet SeedCompressionSheet` | `seedCompressionPrompt` |
 | `LauncherView.swift .sheet ConsoleControllersSheet` | `controllersSheet` |
 | `LauncherView.swift .alert Text` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
 | `LauncherView.swift .sheet LauncherConfirmSheet` | `removeGame` |
@@ -275,6 +290,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `LibraryArtworkState.swift .popover Text` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
 | `MissingImgGuideSheet.swift .sheet BatchRefreshSheet` | `batchRefresh` |
 | `MissingImgGuideSheet.swift .sheet MissingImgGuideSheet` | `imgGuide` |
+| `MissingImgGuideSheet.swift .sheet RefreshCompletionSheet` | `refreshCompletion` |
 | `OnboardingKeysContent.swift .popover VStack` | Reason: A popover or an alert: AppKit draws it in its own window, which a capture of the scene cannot hold. The scene shows what opens it. |
 | `PlayersCard.swift .sheet PlayerNameSheet` | `playerName` |
 | `PlayersCard.swift .sheet LauncherConfirmSheet` | `confirmRemovePlayer` |
@@ -298,7 +314,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `hero.switch2` | `librarySwitch2` |
 | `library.skippedBanner` | `libraryNoticeWarning` |
 
-## States: 268 of 268 in a scene
+## States: 285 of 285 in a scene
 
 | State | Scenes |
 |---|---|
@@ -323,6 +339,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `LibraryArtworkState.Attention.missingData` | `desktop-cardEveryState`, `libraryGames` |
 | `LibraryArtworkState.Attention.fixFiles` | `desktop-cardEveryState` |
 | `LibraryArtworkState.Attention.building` | `desktop-cardEveryState` |
+| `LibraryArtworkState.Attention.queued` | `desktop-cardEveryState` |
 | `HeroRefreshState.upToDate` | `desktop-heroPlay` |
 | `HeroRefreshState.specificFast` | `desktop-heroRefreshFast` |
 | `HeroRefreshState.specificFull` | `desktop-heroRefreshFull` |
@@ -371,6 +388,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `BuildFailureKind.cloudFolder` | `buildFailure-cloudFolder` |
 | `BuildFailureKind.volumeFormat` | `buildFailure-volumeFormat` |
 | `BuildFailureKind.devicePairing` | `buildFailure-devicePairing` |
+| `BuildFailureKind.developerMode` | `buildFailure-developerMode` |
 | `BuildFailureKind.shellDataIncomplete` | `buildFailure-shellDataIncomplete` |
 | `BuildFailureKind.engineOffline` | `buildFailure-engineOffline` |
 | `BuildFailureKind.engineSync` | `buildFailure-engineSync` |
@@ -411,6 +429,20 @@ popover and alert, every notice and every case of the state enums the views swit
 | `AppUpdateStore.Phase.preparing` | `desktop-appPreparing` |
 | `EngineChannel.stable` | `settingsTools` |
 | `EngineChannel.experimental` | `desktop-engineExperimental` |
+| `SeedCompressionStore.Phase.prompt` | `seedCompressionPrompt` |
+| `SeedCompressionStore.Phase.running` | `seedCompressionProgress` |
+| `SeedCompressionStore.Phase.done` | `seedCompressionDone` |
+| `SeedCompressionStore.ItemStatus.waiting` | `seedCompressionProgress` |
+| `SeedCompressionStore.ItemStatus.compressing` | `seedCompressionProgress` |
+| `SeedCompressionStore.ItemStatus.done` | `seedCompressionProgress` |
+| `SeedCompressionStore.ItemStatus.failed` | `seedCompressionProgress` |
+| `SeedCompressionStore.ScanState.idle` | `settingsTools` |
+| `SeedCompressionStore.ScanState.scanning` | `settingsTools` |
+| `SeedCompressionStore.ScanState.ready` | `desktop-seedCompressionStorage` |
+| `SeedCompressionStore.ScanState.failed` | `settingsTools` |
+| `SeedCompressSummary.Status.completed` | `seedCompressionDone` |
+| `SeedCompressSummary.Status.partial` | `seedCompressionDonePartial` |
+| `SeedCompressSummary.Status.stopped` | `seedCompressionDoneStopped` |
 | `NxkitUpdateState.idle` | `desktop-nxkitIdle` |
 | `NxkitUpdateState.checking` | `desktop-nxkitChecking` |
 | `NxkitUpdateState.upToDate` | `nxkitEngine` |
@@ -508,6 +540,7 @@ popover and alert, every notice and every case of the state enums the views swit
 | `ConsoleSheet.confirmReset` | `console-confirmReset` |
 | `ConsoleSheet.confirmUpdate` | `console-confirmUpdate` |
 | `ConsoleSheet.cloudSave` | `console-cloudSaveQuestion`, `console-cloudSaveUnreadable` |
+| `ConsoleSheet.mngMigration` | `console-mngMigration` |
 | `ConsoleSheet.gamePage` | `consoleGamePage` |
 | `ConsoleSheet.allGames` | `consoleAllGames` |
 | `ConsoleSheet.search` | `consoleSearch` |

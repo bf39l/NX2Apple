@@ -73,10 +73,10 @@ extension LiveConsoleDriver {
         }
         let on = files.enabled(buildID)
         result.items = all.compactMap { c in
-            if c.pairOff || (c.kind == .label && (c.name.isEmpty || c.name.hasPrefix("--Section"))) { return nil }
+            if c.pairOff || (c.kind == .label && (c.name.isEmpty || c.isSectionMarker || c.name.hasPrefix("--Section"))) { return nil }
             switch c.kind {
             case .label: return ConsoleCheat(key: c.key, name: c.name, kind: .label, on: false)
-            case .master: return ConsoleCheat(key: c.key, name: c.name, kind: .alwaysOn, on: true)
+            case .master: return c.broken ? nil : ConsoleCheat(key: c.key, name: c.name, kind: .alwaysOn, on: true)
             case .cheat: return c.switchable ? ConsoleCheat(key: c.key, name: c.name, kind: .cheat, on: on.contains(c.key)) : nil
             }
         }
@@ -153,6 +153,12 @@ extension LiveConsoleDriver {
         if state.pausedGameID != nil { state.askQuitPaused(then: .leave(selecting: gameID)); return }   // the paused game quits first (#952)
         if let id = UUID(uuidString: gameID) { library.selectedID = id }
         state.exitToDesktop()
+    }
+
+    /// Report for a game nxkit built without a game profile: the prefilled issue in the browser, nothing is sent by itself.
+    func openGenericBuildReport(_ gameID: String) {
+        guard let url = state.games.first(where: { $0.id == gameID })?.genericReport else { return }
+        openURL(url)
     }
 
     // MARK: The launcher's switches

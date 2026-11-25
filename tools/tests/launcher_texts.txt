@@ -1,8 +1,14 @@
 120 fps
 16:9 (Switch)
+16x
+2x
 30 fps
+40 fps
+4x
 60 fps
+8x
 American English
+Automatic
 Brazilian Portuguese
 British English
 Canadian French
@@ -19,11 +25,13 @@ Fill
 Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 Fit
 Frame buffering
+Frame generation
 Frame rate
 Frame-rate counter
 French
 Fullscreen
 Game
+Game default
 Game language
 Game rumble
 Game's own
@@ -37,6 +45,7 @@ Italian
 Japanese
 Keeps a pipeline archive; uses more memory.
 Korean
+Landscape
 Large
 Latin American Spanish
 Left stick
@@ -51,6 +60,7 @@ MetalFX
 Microphone
 Microphone gain
 Mix with other audio
+Original
 Performance
 Performance HUD
 Picture
@@ -59,21 +69,30 @@ Pipeline prebuild
 Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access.
 Plays game audio alongside other apps instead of stopping them.
 Polish
+Portrait
 Portuguese
 Press a button to join
+Recommended
 Render scale
+Rotation
 Rumble cutoff
 Rumble strength
 Russian
 Saves memory on devices without hardware BC textures, with slightly less precise HDR textures.
 Shader prefetch
+Sharper ground and walls seen at an angle. 16x costs little on a Mac.
+Shows 60 frames a second while the game draws 30. MetalFX makes a frame between each two, with less work and heat than 60 fps, slightly more input delay, and possible smearing on fast motion.
 Simplified Chinese
 Size
+Skips top mip levels of large static textures to save GPU memory and reduce heat. Takes effect on next launch.
 Small
+Smooth
 Spanish
 Standard
 Switch 2 controllers
 Taller shapes render more pixels and can increase GPU time and heat.
+Texture filtering
+Texture quality
 Thai
 The first start waits a few minutes for it, once.
 The size of the on-screen controls. Controls move toward medium when a size does not fit the screen.

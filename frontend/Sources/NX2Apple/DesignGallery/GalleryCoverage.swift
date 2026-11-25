@@ -19,6 +19,9 @@ enum GalleryCoverage {
         ("NXCore/BuildQueue.swift", "QueueEntry.Status"), ("NXCore/TransferQueue.swift", "TransferEntry.Status"),
         ("NXCore/ActiveOperation.swift", "ActiveOperation.Kind"), ("NXLauncher/SendSelectedSheet.swift", "SendSelectedSheet.Mode"),
         ("NXModel/AppUpdateStore.swift", "AppUpdateStore.Phase"), ("NXCore/EngineUpdater.swift", "EngineChannel"),
+        ("NXModel/SeedCompressionStore.swift", "SeedCompressionStore.Phase"), ("NXModel/SeedCompressionStore.swift", "SeedCompressionStore.ItemStatus"),
+        ("NXModel/SeedCompressionStore.swift", "SeedCompressionStore.ScanState"),
+        ("NXCore/SeedCompression.swift", "SeedCompressSummary.Status"),
         ("NXModel/BuildStore+Nxkit.swift", "NxkitUpdateState"), ("NXCore/NxkitUpdate.swift", "NxkitUpdate.Rejection"),
         ("NXCore/NxkitBuilder.swift", "NxkitBuilder.Availability"), ("NXModel/BuildStore+Nxkit.swift", "NxkitFeedbackPrompt.Moment"),
         ("NX2Apple/CloudSaveGate.swift", "CloudSaveStep"), ("NX2Apple/SaveDiscovery.swift", "SavesModel.DeviceState"),
@@ -54,20 +57,20 @@ enum GalleryCoverage {
         "LauncherNotice": [.buildsSetupHint], "DSSpinner": [.libraryEngineSyncing], "EngineSyncBanner": [.libraryNoticeError, .settingsEngineError],
         "ManageMenuPanel": [.desktop(D.manageMenu), .desktop(D.manageMenuPad)], "ArtworkPanel": [.desktop(D.artworkHero), .desktop(D.artworkThumbnail)],
         "SkeletonTile": [.desktop(D.artworkLoading)], "ConsoleConnectionPrompt": [.desktop(D.consolePrompt)],
-        "ConsoleToastView": [.desktop(D.controllerToast), .console(C.homeToast)], "NxkitFeedbackRow": [.nxkitFinished, .nxkitLibrary],
+        "ConsoleToastView": [.desktop(D.controllerToast), .console(C.homeToast)], "NxkitFeedbackRow": [.nxkitFinished, .nxkitLibrary], "NxkitGenericBuildRow": [.nxkitGeneric],
         "BuildActivityFooter": [.buildsRunning, .desktop(D.footerExporting)], "BuildProgressRevealMask": [.buildsRunning, .motion(.iconReveal)],
         "BuildCompletionTimerStroke": [.desktop(D.buildJustFinished), .motion(.buildFinishing)], "LauncherWordmark": [.onboarding(.fresh)],
         // the build page
         "BuildPage": [.buildsIdle, .gamePage], "LauncherPageScroll": [.buildsIdle],
         "EngineSwitcherCard": [.buildsIdle, .nxkitFailed, .desktop(D.mngRecommend), .desktop(D.mngRecommendInstalled)],
         "EngineDropdownPanel": [.desktop(D.engineDropdown)], "LauncherCustomDropdownBox": [.desktop(D.engineDropdown)],
-        "EngineExperimentalBadge": [.desktop(D.engineDropdown)], "UpstreamVersionPill": [.buildsIdle, .desktop(D.engineDropdown)],
+        "EngineExperimentalBadge": [.desktop(D.engineDropdown)], "EnginePlatformBadge": [.desktop(D.engineDropdown)], "UpstreamVersionPill": [.buildsIdle, .desktop(D.engineDropdown)],
         "FilesCard": [.addGameFound, .addGamePartial], "FileRow": [.addGameFound], "FileRowDivider": [.addGameFound],
         "LauncherInfoHelp": [.addGameFound], "ActionCard": [.addGameFound], "TargetCard": [.gamePage, .wizardPlatform],
         "InstallCard": [.wizardInstall], "RefreshDevicesButton": [.wizardInstall], "LauncherBrandMark": [.wizardInstall],
         "BuildMetadataHero": [.buildOneStage, .buildMultiStage], "BuildIconReveal": [.buildOneStage, .motion(.iconReveal)],
         "BuildProcessCard": [.buildMultiStage], "BuildProcessRows": [.buildMultiStage], "CardDisclosure": [.buildOneStage],
-        "ProgressCard": [.buildsRunning, .nxkitFailed], "LauncherProgressBar": [.buildsRunning], "BuildUpNextSection": [.buildsQueued, .desktop(D.queueRunning)],
+        "ProgressCard": [.buildsRunning, .nxkitFailed], "LauncherProgressBar": [.buildsRunning],
         "BuildQueueHero": [.desktop(D.queueRunning)], "QueueArtworkStack": [.desktop(D.queueRunning), .buildsQueued],
         "BuildQueueCard": [.desktop(D.queueEveryState)], "BuildPlatformChip": [.desktop(D.queueEveryState), .sheet(.buildSelected)],
         "ArtworkOutcomeBadge": [.desktop(D.queueEveryState)], "OutcomeCard": [.buildFinishedMac, .buildFinishedIOS],
@@ -82,7 +85,7 @@ enum GalleryCoverage {
         "PersonalDefaultsCard": [.settings], "MissingToolRow": [.desktop(D.missingTool)], "LibraryFoldersCard": [.settingsLibrary, .desktop(D.libraryFolders)],
         "GlobalSavesCard": [.settingsLibrary], "CloudSavesCard": [.settingsLibrary, .gameOptions], "PlayersCard": [.desktop(D.players)],
         "ControlsCard": [.settingsControls], "StickDeadzoneCard": [.settingsControls], "StickVisualizer": [.settingsControls],
-        "KeysCard": [.settingsTools], "ToolsCard": [.settingsTools], "ShellCacheRow": [.settingsTools], "CacheFolderRow": [.settingsTools], "BuildCacheRows": [.settingsTools], "DiagnosticsButton": [.settingsTools],
+        "KeysCard": [.settingsTools], "ToolsCard": [.settingsTools], "ShellCacheRow": [.settingsTools], "CacheFolderRow": [.settingsTools], "BuildCacheRows": [.settingsTools], "SeedCompressionSettingsRow": [.settingsTools, .desktop(D.seedCompressionStorage)], "DiagnosticsButton": [.settingsTools],
         "BuildFilesCard": [.settingsTools], "DSOverflowMenu": [.settingsTools], "LauncherDropdown": [.settingsTools, .settings],
         "UpstreamPicker": [.nxkitEngine, .desktop(D.mngBlocked)], "UpstreamBuilderRow": [.desktop(D.mngUpdateAvailable), .desktop(D.mngBlocked), .desktop(D.mngDownloadingSettings)],
         "DSRowMessageView": [.nxkitUnavailable, .desktop(D.nxkitUnreachable)],
@@ -95,13 +98,16 @@ enum GalleryCoverage {
         "DeleteGameSheet": [.sheet(.deleteGame), .desktop(D.deleteGameIOS)], "RenameGameSheet": [.sheet(.rename)],
         "ConsoleControllersSheet": [.sheet(.controllersSheet)], "ControlsView": [.sheet(.controlsSheet)], "PadModeSection": [.sheet(.controlsSheet)],
         "ControllerMappingStatus": [.sheet(.controlsSheet)], "SteamControllerSection": [.sheet(.controlsSheet)],
-        "CloudSaveSheet": [.sheet(.cloudChoose), .sheet(.cloudFetching)], "FreeSpaceView": [.sheet(.freeSpace), .desktop(D.freeSpaceRunning)],
+        "CloudSaveSheet": [.sheet(.cloudChoose), .sheet(.cloudFetching)], "CloudSyncConflictSheet": [.sheet(.cloudSyncConflict)], "FreeSpaceView": [.sheet(.freeSpace), .desktop(D.freeSpaceRunning)],
         "BuildFilesRemoveSheet": [.sheet(.buildFilesRemove)], "BuildSelectedSheet": [.sheet(.buildSelected)],
-        "SupportedGamesSheet": [.sheet(.supportedGames)], "SupportedGameRow": [.sheet(.supportedGames)], "BatchRefreshSheet": [.sheet(.batchRefresh)],
-        "MissingImgGuideSheet": [.sheet(.imgGuide)], "SavesView": [.sheet(.saves), .desktop(D.savesReady)], "SaveImportSheet": [.sheet(.saveImport)],
+        "SupportedGamesSheet": [.sheet(.supportedGames)], "ActivityLogSheet": [.sheet(.activityLog), .sheet(.activityLogEmpty)], "SupportedGameRow": [.sheet(.supportedGames)], "BatchRefreshSheet": [.sheet(.batchRefresh)],
+        "MissingImgGuideSheet": [.sheet(.imgGuide)], "RefreshCompletionSheet": [.sheet(.refreshCompletion)], "SavesView": [.sheet(.saves), .desktop(D.savesReady)], "SaveImportSheet": [.sheet(.saveImport)],
         "SkippedLibraryItemsOverlay": [.sheet(.skippedItems)], "SkippedItemRow": [.sheet(.skippedItems)], "UpdateSheet": [.sheet(.appUpdate)],
+        "SeedCompressionSheet": [.sheet(.seedCompressionPrompt), .sheet(.seedCompressionProgress), .sheet(.seedCompressionDone)],
+        "MngSaveMigrationSheet": [.sheet(.mngSaveMigration)],
         "PlayerNameSheet": [.sheet(.playerName)], "BuildProcessStepsSheet": [.sheet(.buildSteps)],
         "SendSelectedSheet": [.sheet(.sendSelectedDevice), .desktop(D.sendSelectedDrive)], "ShellCopySheet": [.sheet(.shellCopy)], "CheatsView": [.sheet(.cheats)],
+        "CheatsOverviewCard": [.sheet(.cheats)], "CheatsCountPill": [.sheet(.cheats)], "CheatTriggerKeyPill": [.sheet(.cheats)], "CheatCapabilityTag": [.sheet(.cheats)],
         "LaunchOptionsView": [.gameOptions], "ChangedLabel": [.gameOptions], "GameSavesSection": [.gameOptions], "LauncherSlider": [.gameOptions],
         "GameControllerMappingView": [.desktop(D.controllerMapping)], "FrameTimesRecordingView": [.desktop(D.frameTimes)],
         // the first run
@@ -117,6 +123,7 @@ enum GalleryCoverage {
         "ConsolePlayersChip": [.console(C.controllersMixed), .consoleHome], "ConsoleGameTile": [.consoleHome], "ConsoleArtwork": [.consoleHome],
         "ConsoleBuildIndicator": [.consoleHomeBuilding], "ConsolePrimaryButton": [.console(C.explainNeedsBuild), .console(C.homeStopped)],
         "ConsoleLaunchProgress": [.consoleStarting, .console(C.startingOpening)], "ConsoleCloudSaveView": [.console(C.cloudSaveQuestion)],
+        "ConsoleMngMigrationView": [.console(C.mngMigration)],
         "ConsoleQuestionLayer": [.console(C.confirmExit)], "ConsoleQuestion": [.console(C.confirmExit), .console(C.confirmStopBuild)],
         "ConsoleAllGamesPage": [.consoleAllGames], "ConsoleGridTile": [.consoleAllGames], "ConsoleSearchPage": [.consoleSearch],
         "ConsoleKeyButton": [.consoleSearch], "ConsoleSegmentedControl": [.consoleGamePage, .consoleAllGames],
@@ -127,7 +134,7 @@ enum GalleryCoverage {
         "ConsoleSectionHeading": [.consoleOptions], "ConsoleFocused": [.consoleOptionsStepperFocus], "ConsoleMenuRow": [.console(C.menu)],
         "ConsoleAdvancedList": [.console(C.advanced)], "ConsoleGamePadPage": [.console(C.gamePad)], "ConsoleLibraryList": [.console(C.menuLibrary)],
         "ConsoleSettingsList": [.console(C.menuSettings)], "ConsolePageHeader": [.console(C.supportedGames), .console(C.cloudSaves)],
-        "ConsoleSupportedGamesPage": [.console(C.supportedGames)], "ConsoleCloudSavesPage": [.console(C.cloudSaves)],
+        "ConsoleSupportedGamesPage": [.console(C.supportedGames)], "ConsoleTag": [.consoleOptions, .console(C.supportedGames)], "ConsoleCloudSavesPage": [.console(C.cloudSaves)],
         "ConsolePadMappingSheet": [.console(C.mappingStandard), .console(C.mappingCustom)], "ConsolePadDiagram": [.console(C.mappingCustom)],
         "ConsolePadGlyph": [.console(C.mappingCustom)], "ChangedDot": [.console(C.mappingCustom)],
         "ConsoleBuildsPage": [.consoleBuilds], "ConsoleProgressBar": [.consoleBuilds], "ConsoleGroupedList": [.consoleBuilds, .consoleGamePage],
@@ -149,6 +156,7 @@ enum GalleryCoverage {
         "LauncherView.swift .sheet UpdateSheet": [.sheet(.appUpdate)],
         "LauncherView.swift .sheet LauncherConfirmSheet 2": [.sheet(.confirmUninstall)],
         "LauncherView.swift .sheet SavesView": [.sheet(.saves)],
+        "LauncherView+SeedCompression.swift .sheet SeedCompressionSheet": [.sheet(.seedCompressionPrompt)],
         "BuildFiles.swift .sheet BuildFilesRemoveSheet": [.sheet(.buildFilesRemove)],
         "LaunchOptionsView.swift .sheet LauncherConfirmSheet": [.sheet(.confirmTestedValues)],
         "LaunchOptionsView.swift .sheet GameControllerMappingView": [.desktop(D.controllerMapping)],
@@ -160,6 +168,7 @@ enum GalleryCoverage {
         "GameSavesSection.swift .sheet SaveImportSheet": [.sheet(.saveImport)],
         "MissingImgGuideSheet.swift .sheet BatchRefreshSheet": [.sheet(.batchRefresh)],
         "MissingImgGuideSheet.swift .sheet MissingImgGuideSheet": [.sheet(.imgGuide)],
+        "MissingImgGuideSheet.swift .sheet RefreshCompletionSheet": [.sheet(.refreshCompletion)],
         "BuildFailureCard.swift .sheet LauncherConfirmSheet": [.sheet(.confirmBuildAnyway)],
         "ToolsCard.swift .sheet DSSheet": [.sheet(.invalidXcode)],
         "ToolsCard.swift .sheet LauncherConfirmSheet": [.sheet(.confirmEngineChannel)],
@@ -169,6 +178,7 @@ enum GalleryCoverage {
         "ShellCopySheet.swift .sheet ShellCopySheet": [.sheet(.shellCopy)],
         "PlayersCard.swift .sheet PlayerNameSheet": [.sheet(.playerName)],
         "PlayersCard.swift .sheet LauncherConfirmSheet": [.sheet(.confirmRemovePlayer)],
+        "CloudSavesCard.swift .sheet CloudSyncConflictSheet": [.sheet(.cloudSyncConflict)],
     ]
 
     /// The launcher's notices (LauncherNoticeItem), by id.
@@ -190,7 +200,7 @@ enum GalleryCoverage {
         add("LibraryGame.Primary", ["play": [.desktop(D.heroPlay)], "openOnDevice": [.desktop(D.heroOnDevice)], "build": [.libraryGames]])
         add("LibraryArtworkState.Attention", ["none": [.desktop(D.cardEveryState)], "notBuilt": [.desktop(D.cardEveryState)],
                                               "missingData": [.desktop(D.cardEveryState), .libraryGames], "fixFiles": [.desktop(D.cardEveryState)],
-                                              "building": [.desktop(D.cardEveryState)]])
+                                              "building": [.desktop(D.cardEveryState)], "queued": [.desktop(D.cardEveryState)]])
         add("HeroRefreshState", ["upToDate": [.desktop(D.heroPlay)], "specificFast": [.desktop(D.heroRefreshFast)],
                                  "specificFull": [.desktop(D.heroRefreshFull)], "generalSync": [.libraryEngineUpdate]])
         add("ArtworkSlot", ["hero": [.desktop(D.artworkHero)], "thumbnail": [.desktop(D.artworkThumbnail)]])
@@ -216,6 +226,10 @@ enum GalleryCoverage {
         add("AppUpdateStore.Phase", ["idle": [.settings, .desktop(D.appAvailable)], "checking": [.desktop(D.appChecking)],
                                      "downloading": [.desktop(D.appDownloading)], "preparing": [.desktop(D.appPreparing)]])
         add("EngineChannel", ["stable": [.settingsTools], "experimental": [.desktop(D.engineExperimental)]])
+        add("SeedCompressionStore.Phase", ["prompt": [.sheet(.seedCompressionPrompt)], "running": [.sheet(.seedCompressionProgress)], "done": [.sheet(.seedCompressionDone)]])
+        add("SeedCompressionStore.ItemStatus", ["waiting": [.sheet(.seedCompressionProgress)], "compressing": [.sheet(.seedCompressionProgress)], "done": [.sheet(.seedCompressionProgress)], "failed": [.sheet(.seedCompressionProgress)]])
+        add("SeedCompressionStore.ScanState", ["idle": [.settingsTools], "scanning": [.settingsTools], "ready": [.desktop(D.seedCompressionStorage)], "failed": [.settingsTools]])
+        add("SeedCompressSummary.Status", ["completed": [.sheet(.seedCompressionDone)], "partial": [.sheet(.seedCompressionDonePartial)], "stopped": [.sheet(.seedCompressionDoneStopped)]])
         add("NxkitUpdateState", ["idle": [.desktop(D.nxkitIdle)], "checking": [.desktop(D.nxkitChecking)], "upToDate": [.nxkitEngine],
                                  "waitingForBuild": [.desktop(D.nxkitWaiting)], "rejected": [.nxkitUnsigned], "unreachable": [.desktop(D.nxkitUnreachable)]])
         add("NxkitUpdate.Rejection", ["unsigned": [.nxkitUnsigned], "badSignature": [.desktop(D.nxkitBadSignature)], "checksum": [.desktop(D.nxkitChecksum)],
@@ -254,7 +268,7 @@ enum GalleryCoverage {
             "library": [.console(C.menuLibrary)], "settings": [.console(C.menuSettings)], "language": [.console(C.menuLanguage)],
             "cloudSaves": [.console(C.cloudSaves)], "confirmExit": [.console(C.confirmExit)], "confirmMapping": [.console(C.confirmMapping)],
             "advanced": [.console(C.advanced)], "confirmReset": [.console(C.confirmReset)], "confirmUpdate": [.console(C.confirmUpdate)],
-            "cloudSave": [.console(C.cloudSaveQuestion), .console(C.cloudSaveUnreadable)], "gamePage": [.consoleGamePage], "allGames": [.consoleAllGames],
+            "cloudSave": [.console(C.cloudSaveQuestion), .console(C.cloudSaveUnreadable)], "mngMigration": [.console(C.mngMigration)], "gamePage": [.consoleGamePage], "allGames": [.consoleAllGames],
             "search": [.consoleSearch], "builds": [.consoleBuilds], "quickMenu": [.consoleQuickMenu], "manage": [.console(C.manage)],
             "stopped": [.console(C.homeStopped)], "confirmStopBuild": [.console(C.confirmStopBuild)], "confirmQuitPaused": [.console(C.confirmQuitPaused)],
             "supportedGames": [.console(C.supportedGames)]])

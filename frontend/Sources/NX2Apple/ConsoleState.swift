@@ -60,7 +60,22 @@ struct ConsoleGame: Identifiable {
     var playSeconds: Double = 0
     var olderTools = false
     var isMacNativeGames = false
+    var builtTunedEngineName: String? = nil
+    var tunedEngineNames: [String] = []
+    var activeMacEngine: EngineUpstreamKind? = nil
+    var builtMacEngines: [EngineUpstreamKind] = []
     var lastSave: Date?
+
+    var activeEngineBadgeName: String? {
+        if let activeMacEngine, builtMacEngines.count > 1 || activeMacEngine != .nxnative {
+            return activeMacEngine.displayName
+        }
+        return builtTunedEngineName ?? (isMacNativeGames ? EngineUpstreamKind.macNativeGames.displayName : nil)
+    }
+    /// nxkit built the app without a game profile (NxkitBuildProfile, v0lumehi/nxkit#54), read by the driver: the tile and the page say so.
+    var genericBuild: NxkitBuildProfile?
+    /// The prefilled report for such a build (NxkitFeedback.genericBuildReportURL), opened only when the player chooses Report.
+    var genericReport: URL?
 
     /// The console's order: the games this Mac can play first, then the rest, each group in the order it came in.
     static func readyFirst(_ games: [ConsoleGame]) -> [ConsoleGame] {
@@ -152,7 +167,7 @@ enum ConsoleSheet: Equatable {
     /// cloudSave: the cloud's save and this Mac's both changed, or the cloud's cannot be read: the player chooses before the start (#957).
     /// advanced: a game's advanced options. confirmReset: "Reset this game's options?". confirmUpdate: install the app's update, or restart into it.
     case options(String), controllers, explanation(String), homeButtonHint, menu, mapping, gamePad(String), library, settings, language, cloudSaves, confirmExit, confirmMapping
-    case advanced(String), confirmReset(String), confirmUpdate, cloudSave(CloudSaveQuestion)
+    case advanced(String), confirmReset(String), confirmUpdate, cloudSave(CloudSaveQuestion), mngMigration(MngMigrationQuestion)
     /// #816: a game's page (A on a tile), all games with their filters, the search with its keyboard, the builds, the quick menu (−),
     /// a game's Manage panel, "stopped unexpectedly" after a crash, and the questions before Stop and before quitting a paused game (#952).
     case gamePage(String), allGames, search, builds, quickMenu, manage(String), stopped, confirmStopBuild, confirmQuitPaused
@@ -181,6 +196,7 @@ enum ConsoleSheet: Equatable {
         case .confirmQuitPaused: return "console.confirmQuitPaused"
         case .language: return "console.language"
         case .cloudSave: return "console.cloudSave"
+        case .mngMigration: return ConsoleMngMigrationView.scope
         case .confirmExit: return "console.confirmExit"
         case .confirmMapping: return "console.confirmMapping"
         case .advanced: return "console.advanced"
@@ -404,6 +420,12 @@ struct ConsoleState {
         startingGameID = nil
         sheets = [.cloudSave(question)]
     }
+    /// First-time MNG shared-save migration choice presented before launching.
+    mutating func askMngMigration(_ question: MngMigrationQuestion) {
+        guard !exited else { return }
+        startingGameID = nil
+        sheets = [.mngMigration(question)]
+    }
     mutating func back() {
         guard !exited else { return }
         if startingGameID != nil { return }
@@ -467,6 +489,8 @@ struct ConsoleState {
     func askResetOptions(_ gameID: String)
     func resetOptions(_ gameID: String)
     func openOnDesktop(_ gameID: String)
+    /// Report on the page of a game nxkit built without a game profile: its prefilled issue (ConsoleGame.genericReport) in the browser.
+    func openGenericBuildReport(_ gameID: String)
     func buildGame(_ gameID: String, queueOnly: Bool)
     /// A launcher switch (on the Library, Controllers or Settings page), and the app's update (checked, or asked about and then installed or restarted into).
     func setPref(_ pref: ConsolePref, on: Bool)
@@ -507,6 +531,8 @@ struct ConsoleState {
     func chooseCloudSave(_ choice: CloudSaveCheck.Choice)
     /// The cloud save question's Try again: the check runs again.
     func retryCloudSave()
+    /// First-time MNG shared-save migration decision before launching.
+    func chooseMngMigration(_ choice: MngSaveMigration.Choice)
 
     // #816 (ConsoleState+Pages.swift): a game's page and its tabs, all games (filter on L and R, order on Y), the search and its
     // keyboard, the builds and Stop (asked first), the quick menu and a game's Manage panel.
@@ -529,6 +555,8 @@ struct ConsoleState {
     func stopBuild()
     func openQuickMenu()
     func openManage(_ gameID: String)
+    func setDefaultMacEngine(_ gameID: String, upstream: EngineUpstreamKind)
+    func launchWithMacEngine(_ gameID: String, upstream: EngineUpstreamKind)
     /// #952: the paused game plays again, and the answer Quit to "Quit <game>?" (the paused game quits, then what waited for it runs).
     func resume(_ gameID: String)
     func quitPausedGame()
@@ -557,6 +585,7 @@ extension ConsoleDriver {
     func askResetOptions(_ gameID: String) {}
     func resetOptions(_ gameID: String) {}
     func openOnDesktop(_ gameID: String) { exitToDesktop() }
+    func openGenericBuildReport(_ gameID: String) {}
     func buildGame(_ gameID: String, queueOnly: Bool) {}
     func setPref(_ pref: ConsolePref, on: Bool) {}
     func appUpdateAction() {}
@@ -567,6 +596,7 @@ extension ConsoleDriver {
     func openHomeButtonSettings() { back() }
     func chooseCloudSave(_ choice: CloudSaveCheck.Choice) { back() }
     func retryCloudSave() { back() }
+    func chooseMngMigration(_ choice: MngSaveMigration.Choice) { back() }
     func openGamePage(_ gameID: String) {}
     func stepGameTab(_ step: Int) {}
     func openAllGames() {}
@@ -586,6 +616,8 @@ extension ConsoleDriver {
     func stopBuild() {}
     func openQuickMenu() {}
     func openManage(_ gameID: String) {}
+    func setDefaultMacEngine(_ gameID: String, upstream: EngineUpstreamKind) {}
+    func launchWithMacEngine(_ gameID: String, upstream: EngineUpstreamKind) {}
     func resume(_ gameID: String) {}
     func quitPausedGame() {}
 }

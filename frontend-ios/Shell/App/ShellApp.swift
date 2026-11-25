@@ -25,12 +25,44 @@ struct EngineGameLauncher: GameLauncher {
         let plan = EngineLaunchPlan.make(game: game, appResources: Bundle.main.resourceURL ?? bundleURL, documents: documents, envFileText: envFile)
         let executableURL = plan.frameworkExecutable
         if let refusal = await Task.detached(priority: .userInitiated, operation: {
-            FrameworkSignature.preflightExternal(executable: executableURL, appBundleURL: bundleURL,
-                                                 hostTeamID: ProvisioningProfile.bundledTeamIdentifier())
+            #if os(iOS) && !targetEnvironment(simulator)
+            let allowsHotLoading = ProvisioningProfile.bundledAllowsHotFrameworkLoading()
+            #else
+            let allowsHotLoading = true
+            #endif
+            return FrameworkSignature.preflightExternal(
+                executable: executableURL,
+                appBundleURL: bundleURL,
+                hostTeamID: ProvisioningProfile.bundledTeamIdentifier(),
+                hostCertSHA1: ProvisioningProfile.bundledSigningCertificateSHA1(),
+                allowsHotLoading: allowsHotLoading
+            )
         }).value {
             throw Failure.engine(refusal)
         }
         try plan.createFolders()
+        let purgeLimitMB: Int32 = {
+            if let raw = plan.environment["DM_MEM_PURGE_MB"], let parsed = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return max(0, parsed)
+            }
+            return 4096
+        }()
+        let cheatsDir = plan.gameDirectory.appendingPathComponent("cheats", isDirectory: true)
+        let buildID = CheatFuseGuard.buildID(frameworkURL: game.frameworkURL)
+        await Task.detached(priority: .userInitiated) {
+            if purgeLimitMB > 0 {
+                dm_shell_purge_memory(purgeLimitMB)
+            }
+        }.value
+        let fuseOutcome = ShellRuntimeBridge.cheatFuseSession.beginSession(
+            titleID: game.titleID,
+            cheatsFolder: cheatsDir,
+            buildID: buildID
+        )
+        if let tripped = fuseOutcome.tripped {
+            let what = tripped.disabledMaster ? "master switch" : tripped.disabled.joined(separator: ", ")
+            fputs("shell: cheat crash guard tripped for \(game.titleID) (\(tripped.buildID)): disabled \(what)\n", stderr)
+        }
         let pairs = plan.environment.sorted { $0.key < $1.key }
         let failure = withCStrings(pairs.map(\.key)) { keys in
             withCStrings(pairs.map(\.value)) { values in
@@ -40,7 +72,10 @@ struct EngineGameLauncher: GameLauncher {
                 }
             }
         }
-        if let failure { throw Failure.engine(localizeEngineLaunchError(String(cString: failure))) }
+        if let failure {
+            ShellRuntimeBridge.cheatFuseSession.abortBeforeRun()
+            throw Failure.engine(localizeEngineLaunchError(String(cString: failure)))
+        }
         dm_shell_present_game()
     }
 }
@@ -55,6 +90,23 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
 /// The library's root controller, for ShellMain.m's scene delegate.
 @objc(ShellLibrary) final class ShellLibrary: NSObject {
     @MainActor private static weak var activeModel: ShellHostModel?
+
+    @MainActor @objc static func gameWillPause() {
+        activeModel?.pauseActiveSession()
+    }
+
+    @MainActor @objc static func gameDidCheckpoint() {
+        activeModel?.checkpointActiveSession()
+    }
+
+    @MainActor @objc static func gameDidResume() {
+        activeModel?.resumeActiveSession()
+    }
+
+    @MainActor @objc static func gameDidEnd() {
+        activeModel?.endActiveSession()
+    }
+
     @MainActor private static var pendingOpenURL: URL?
 
     @MainActor @objc static func makeController() -> UIViewController {
@@ -70,6 +122,11 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
             ShellHostBeacon.write(to: documents)
         }
         let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
+        #if os(iOS) && !targetEnvironment(simulator)
+        let supportsHotLoading: @Sendable () -> Bool = { ProvisioningProfile.bundledAllowsHotFrameworkLoading() }
+        #else
+        let supportsHotLoading: @Sendable () -> Bool = { true }
+        #endif
         let config = ShellHostConfig(
             gamesRoot: frameworks,
             appDataRoot: ShellHostConfig.defaultAppDataRoot(),
@@ -81,10 +138,12 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
             },
             requestStopRunningGame: {
                 dm_shell_request_stop_game()
-            }
+            },
+            supportsHotFrameworkLoading: supportsHotLoading
         )
         let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker(),
-                                   certificatePicker: DocumentCertificatePicker())
+                                   certificatePicker: DocumentCertificatePicker(),
+                                   cheatPicker: DocumentCheatFilePicker())
         activeModel = model
         model.startControllers()
         for entry in model.entries {
@@ -113,5 +172,26 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
         guard DeepLinkRouter.isLaunchURL(url) else { return false }
         pendingOpenURL = url
         return true
+    }
+}
+
+/// Objective-C bridge for ShellMain.m: localized disconnect-pause labels and 30 s cheat fuse teardown.
+@objc(ShellRuntimeBridge) final class ShellRuntimeBridge: NSObject {
+    static let cheatFuseSession = CheatFuseSession()
+
+    @objc static func controllerDisconnectTitle() -> String {
+        ControllerDisconnectOverlayStrings.localized().title
+    }
+
+    @objc static func controllerDisconnectMessage() -> String {
+        ControllerDisconnectOverlayStrings.localized().message
+    }
+
+    @objc static func controllerDisconnectResumeTitle() -> String {
+        ControllerDisconnectOverlayStrings.localized().resumeTitle
+    }
+
+    @objc static func didReturnToLibrary() {
+        cheatFuseSession.endSessionCleanly()
     }
 }

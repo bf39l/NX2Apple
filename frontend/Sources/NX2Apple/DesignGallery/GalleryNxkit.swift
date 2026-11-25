@@ -81,6 +81,19 @@ extension GalleryFixtures {
             build.stages = [Stage(id: 1, name: "Extract", state: .done), Stage(id: 2, name: "Shaders", state: .failed, detail: "exit code 1")]
             build.nxkitFeedback = prompt(.failed, exit: 1)
             return launcher(.builds, 1, .general)
+        case .nxkitGeneric:   // the hero of a game nxkit built without a game profile (v0lumehi/nxkit#54), already answered
+            let id = makeNxkitApp(for: 0, in: library)
+            if let app = library.games.first(where: { $0.id == id })?.appPath {
+                try? Data(#"{"schema":1,"settings":[],"build":{"profile":"generic","engine":"unreal","graphics":"vulkan","evidence":["UnrealEngine"],"nxkit_version":"0.10.3"}}"#.utf8)
+                    .write(to: NxkitBuildProfile.listURL(app: app))
+            }
+            var records = build.nxkitRecords
+            let buildID = "gallery-" + UUID().uuidString
+            records[game.titleID.uppercased()] = NxkitBuildRecord(version: "0.10.3", hostBuild: "e01c6312144767845a60021bc69fb597",
+                                                                  buildID: buildID, date: Date(timeIntervalSince1970: 1_789_000_000))
+            build.nxkitRecords = records
+            build.markNxkitFeedbackAsked(buildID + "." + NxkitFeedbackPrompt.Moment.firstLaunch.rawValue)
+            return launcher(.library, 0, .general)
         default:   // .nxkitLibrary: the hero of a game nxkit built, after its first start
             _ = makeNxkitApp(for: 0, in: library)
             var records = build.nxkitRecords
@@ -91,7 +104,7 @@ extension GalleryFixtures {
         }
     }
 
-    /// A stand-in of an app nxb built (bundle id `org.nxkit.game.<id>`, program `nxkit-host`, `Contents/Resources/nxkit`), pointing at /usr/bin/true.
+    /// A stand-in of an app nxb built (DMUpstream `nxkit`, program `nxkit-host`, `Contents/Resources/nxkit`), pointing at /usr/bin/true.
     private func makeNxkitApp(for index: Int, in library: GameLibrary) -> UUID? {
         let game = catalog[index]
         let app = directory.appendingPathComponent("nxkit-apps-" + UUID().uuidString + "/\(game.name).app")
@@ -99,8 +112,9 @@ extension GalleryFixtures {
         try? fm.createDirectory(at: app.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
         try? fm.createDirectory(at: app.appendingPathComponent("Contents/Resources/nxkit"), withIntermediateDirectories: true)
         try? fm.createSymbolicLink(at: app.appendingPathComponent("Contents/MacOS/nxkit-host"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
-        let info: [String: Any] = ["CFBundleDisplayName": game.name, "CFBundleName": game.name, "CFBundleExecutable": "nxkit-host",
-                                   "CFBundleShortVersionString": "1.0.0", "CFBundleIdentifier": "org.nxkit.game." + game.titleID.lowercased()]
+        let info: [String: Any] = ["DMTitleID": game.titleID, "DMUpstream": "nxkit", "CFBundleDisplayName": game.name,
+                                   "CFBundleName": game.name, "CFBundleExecutable": "nxkit-host", "CFBundleShortVersionString": "1.0.0",
+                                   "CFBundleIdentifier": GalleryDefaults.domain("gallery-nxkit")]
         try? PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
         guard var entry = library.games.first(where: { $0.titleID == game.titleID }) else { return nil }
         entry.appPath = app.path

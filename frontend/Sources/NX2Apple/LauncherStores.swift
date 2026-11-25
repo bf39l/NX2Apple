@@ -22,6 +22,8 @@ import NXModel
     let deviceStore: DeviceStore
     let appUpdates: AppUpdateStore
     let build: BuildStore
+    let seedCompression: SeedCompressionStore
+    let seedAutoPromptHost = SeedAutoPromptHost()
     /// The one build queue (#943), kept in Application Support so it survives a restart. A test suite of defaults keeps it in memory.
     let queue: BuildQueueStore
     /// The transfer queue (#1036): game data on its way to devices, beside any build.
@@ -33,6 +35,10 @@ import NXModel
     let players: PlayerProfileStore
     let saveSettings: SaveSettingsStore
     let sticks: StickDeadzoneStore
+    /// Per-title play sessions (#816, #1161), shared by the desktop launcher and console mode.
+    let playSessions: PlaySessionStore
+    /// Temporary session-only pinned game for the library's Recently played row.
+    let librarySelection = LibrarySelectionStore()
     /// The defaults the stores were made with: the launcher keeps its own view settings there too (the library's filter and
     /// sort), so a test's window never writes them into the shared defaults.
     let defaults: UserDefaults
@@ -77,7 +83,12 @@ import NXModel
             installFailed: { laterBuild.value?.note($0) })
         let engineSync = EngineSyncStore(
             localizer: localizer, runner: runner, repo: repo, python: dependencies, defaults: defaults,
-            setRepoPath: { repo.path = $0; laterBuild.value?.refreshUpstreamLocalVersion(for: .nxnative) },
+            setRepoPath: {
+                repo.path = $0
+                laterBuild.value?.refreshUpstreamLocalVersion(for: .nxnative)
+                laterBuild.value?.refreshSeenShadersInfo()
+                laterBuild.value?.refreshQueueSeenShadersEligibility()
+            },
             buildRunning: { laterBuild.value?.running ?? false },
             autoUpdate: { repo.autoUpdate },
             log: { log.append($0) })
@@ -120,6 +131,22 @@ import NXModel
             cancelRunning: { build.cancelTransfer($0) })
         self.transfers = transfers
         build.transfers = transfers
+        self.seedCompression = SeedCompressionStore(
+            runner: runner,
+            repo: repo,
+            python: dependencies,
+            defaults: defaults,
+            seedRoot: { build.seedCacheRoot },
+            seedEnvironment: { build.seedEnvironment },
+            dotnetPath: { dependencies.dotnetPath },
+            buildRunning: { build.running },
+            canAutoPrompt: { [seedAutoPromptHost] in
+                !build.running && !queue.active && !transfers.entries.contains(where: \.active)
+                    && devices.shellCopy == nil && !devices.shellWaiting
+                    && !updates.showUpdateSheet && updates.uninstallPlan == nil
+                    && seedAutoPromptHost.isReady()
+            }
+        )
         // A device that comes back continues the transfers that waited for it. The list is read again every few seconds while one waits.
         transferWatch = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
             .sink { [weak transfers, weak devices] _ in
@@ -130,8 +157,12 @@ import NXModel
                 }
             }
         self.saveSettings = SaveSettingsStore(defaults: defaults)
+        build.saveLocationSettings = { [weak saveSettings] tid in
+            (saveSettings?.global ?? SaveGlobalSettings(), saveSettings?.game(tid) ?? SaveGameOverride())
+        }
         self.sticks = StickDeadzoneStore(defaults: defaults)
         self.players = PlayerProfileStore(defaults: defaults, defaultName: { localizer.t("players.default") })
+        self.playSessions = PlaySessionStore(file: defaults === UserDefaults.standard ? PlaySessionStore.defaultFile : nil)
         // A build that ended settles the queue's running entry and starts the next. The hop lets the install step that follows a
         // build raise `running` again first (the BuildRecorder waits the same way).
         queueWatch = build.$running.removeDuplicates().sink { [weak self, weak build, weak queue] running in
@@ -140,20 +171,50 @@ import NXModel
                 MainActor.assumeIsolated {
                     guard let build, let queue, !build.running else { return }
                     if !queue.packaging.isEmpty {
+                        let batchID = queue.packaging.first?.batch
                         let outcome = build.queueOutcome
                         queue.packageEnded(succeeded: outcome.succeeded, reason: outcome.reason, stopped: outcome.stopped)
+                        if queue.running == nil && !queue.hasWaiting && queue.packaging.isEmpty {
+                            build.deferShellPackaging = false
+                            build.queuedExportIPA = nil
+                            build.queuedExportOneGame = nil
+                            build.queuedExportFramework = nil
+                            build.activeQueuedEntryID = nil
+                            build.activeQueuedArchivePath = nil
+                            build.activeQueuedRebuildsShaders = false
+                            build.enforceUpstreamForCurrentGame()
+                            if let batchID { build.publishBatchQueueRefreshCompletionIfNeeded(batchID: batchID) }
+                        }
                         return
                     }
-                    guard queue.running != nil else { return }
+                    guard queue.running != nil else {
+                        if queue.isAdvancing {
+                            if build.queueOutcome.stopped {
+                                queue.pauseForStoppedExternalOperation()
+                            } else {
+                                if queue.hasWaiting { self?.settleFinishedBuild() }
+                                queue.processNext()
+                            }
+                        }
+                        return
+                    }
+                    let batchID = queue.running?.batch
                     self?.settleFinishedBuild()
                     let outcome = build.queueOutcome
                     build.activeQueuedGameID = nil
+                    build.activeQueuedEntryID = nil
+                    build.activeQueuedArchivePath = nil
+                    build.activeQueuedRebuildsShaders = false
+                    build.activeQueueEntryUpstream = nil
+                    build.queuedIOSSeenShaders = nil
                     queue.buildEnded(succeeded: outcome.succeeded, reason: outcome.reason, stopped: outcome.stopped)
-                    if queue.running == nil {
+                    if queue.running == nil && !queue.hasWaiting && queue.packaging.isEmpty {
                         build.deferShellPackaging = false
                         build.queuedExportIPA = nil
                         build.queuedExportOneGame = nil
                         build.queuedExportFramework = nil
+                        build.enforceUpstreamForCurrentGame()
+                        if let batchID { build.publishBatchQueueRefreshCompletionIfNeeded(batchID: batchID) }
                     }
                 }
             }
@@ -265,6 +326,10 @@ import NXModel
 /// A store that a closure reaches before it exists: the closures of the stores created first read it, the app fills it in last.
 @MainActor private final class Later<T: AnyObject> {
     weak var value: T?
+}
+
+@MainActor final class SeedAutoPromptHost {
+    var isReady: () -> Bool = { false }
 }
 
 protocol RunningPreflightApp: AnyObject {

@@ -36,16 +36,15 @@ private struct OfflineUpstreamTransport: EngineTransport {
         pad.show(default: "set.build.engine"); pad.activate()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         XCTAssertEqual(pad.scope, "engineDropdown")
-        for id in ["nxnative", "download.macnativegames", "download.s2arm"] {
+        for id in ["nxnative", "download.macnativegames", "download.s2arm", "download.kidwithsword", "download.nolagkart"] {
             XCTAssertNotNil(pad.frame(of: "set.build.engine." + id))
         }
         let current = try XCTUnwrap(pad.frame(of: "set.build.engine.nxnative"))
-        for id in ["macnativegames", "s2arm"] {
-            let download = try XCTUnwrap(pad.frame(of: "set.build.engine.download." + id))
-            XCTAssertLessThan(download.maxY - current.minY, 260, "Engine dropdown rows must remain compact")
-        }
+        let expectedNextAfterNxnative = build.nxkitSelectable ? "set.build.engine.nxkit" : "set.build.engine.download.s2arm"
+        let s2Download = try XCTUnwrap(pad.frame(of: "set.build.engine.download.s2arm"))
+        XCTAssertLessThan(s2Download.maxY - current.minY, 260, "General engine rows must remain compact")
         XCTAssertTrue(PadKeyboardInput.handle(125, focus: pad, back: dropdowns.close))
-        XCTAssertEqual(pad.focused, "set.build.engine.download.macnativegames")
+        XCTAssertEqual(pad.focused, expectedNextAfterNxnative)
         pad.move(dx: 0, dy: -1)
         XCTAssertEqual(pad.focused, "set.build.engine.nxnative")
         dropdowns.close()
@@ -80,6 +79,10 @@ private struct OfflineUpstreamTransport: EngineTransport {
             XCTAssertNotNil(pad.frame(of: id))
         }
         pad.focused = "set.upstream"; pad.horizontal(1)
+        XCTAssertEqual(build.buildUpstream, .nxnative)
+        pad.horizontal(-1)
+        XCTAssertEqual(build.buildUpstream, .macNativeGames)
+        pad.horizontal(-1)
         XCTAssertEqual(build.buildUpstream, .s2arm)
     }
 
@@ -131,8 +134,8 @@ private struct OfflineUpstreamTransport: EngineTransport {
         try Data("#!/usr/bin/env python3\n".utf8).write(to: mngDir.appendingPathComponent("build_app.py"))
         build.macNativeGamesPath = mngDir.path
 
-        let nonMngFile = root.appendingPathComponent("Odyssey [0100000000010000].nsp")
-        let nonMngUntaggedFile = root.appendingPathComponent("Odyssey.nsp")
+        let nonMngFile = root.appendingPathComponent("MarioKart [0100152000022000].nsp")
+        let nonMngUntaggedFile = root.appendingPathComponent("MarioKart.nsp")
         let totkFile = root.appendingPathComponent("TOTK [0100F2C0115B6000].nsp")
         try Data([0]).write(to: nonMngFile)
         try Data([0]).write(to: nonMngUntaggedFile)
@@ -161,7 +164,7 @@ private struct OfflineUpstreamTransport: EngineTransport {
         XCTAssertEqual(build.target, BuildTarget.mac)
         XCTAssertNil(pad.frame(of: "set.build.mngRecommend"))
 
-        // 2. Switching to non-5 game reverts to nxnative, disables MacNativeGames inside dropdown, and keyboard arrow skips it.
+        // 2. Switching to a non-12 game reverts to nxnative, disables MacNativeGames inside dropdown, and keyboard arrow skips it.
         build.updateSlot("base") { $0.paths = [nonMngFile.path] }
         RunLoop.main.run(until: Date().addingTimeInterval(0.15))
         XCTAssertEqual(build.buildUpstream, .nxnative)
@@ -170,12 +173,14 @@ private struct OfflineUpstreamTransport: EngineTransport {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         XCTAssertEqual(pad.scope, "engineDropdown")
         XCTAssertNil(pad.frame(of: "set.build.engine.macnativegames"), "Disabled MacNativeGames row must not register active padTarget")
-        XCTAssertTrue(PadKeyboardInput.handle(125, focus: pad, back: dropdowns.close))
-        XCTAssertEqual(pad.focused, "set.build.engine.download.s2arm", "Down arrow must skip disabled MacNativeGames row")
+        XCTAssertNil(pad.frame(of: "set.build.engine.download.kidwithsword"), "Disabled Kid with Sword row must not register active padTarget")
+        XCTAssertNil(pad.frame(of: "set.build.engine.download.nolagkart"), "Disabled No Lag Kart row must not register active padTarget")
         if build.nxkitSelectable {
             XCTAssertTrue(PadKeyboardInput.handle(125, focus: pad, back: dropdowns.close))
             XCTAssertEqual(pad.focused, "set.build.engine.nxkit")
         }
+        XCTAssertTrue(PadKeyboardInput.handle(125, focus: pad, back: dropdowns.close))
+        XCTAssertEqual(pad.focused, "set.build.engine.download.s2arm", "Down arrow must skip disabled game-tuned rows")
         XCTAssertTrue(PadKeyboardInput.handle(125, focus: pad, back: dropdowns.close))
         XCTAssertEqual(pad.focused, "set.build.engine.nxnative")
         dropdowns.close()
@@ -183,8 +188,8 @@ private struct OfflineUpstreamTransport: EngineTransport {
         // 2b. Library game without [TitleID] in filename still reverts MNG and blocks it in Builds.
         build.buildUpstream = .macNativeGames
         let untaggedGame = LibraryGame(
-            titleID: "0100000000010000",
-            name: "Odyssey",
+            titleID: "0100152000022000",
+            name: "Mario Kart 8 Deluxe",
             lastTarget: BuildTarget.ios,
             inputs: ["base": [nonMngUntaggedFile.path]]
         )
@@ -209,15 +214,16 @@ private struct OfflineUpstreamTransport: EngineTransport {
         XCTAssertEqual(build.buildUpstream, .nxnative)
         XCTAssertEqual(build.target, BuildTarget.ios)
         XCTAssertTrue(build.isMNGBlockedByCurrentGame)
-        XCTAssertEqual(build.detectedGameTitleID16, "0100000000010000")
+        XCTAssertEqual(build.detectedGameTitleID16, "0100152000022000")
 
-        // 3. SupportedGamesSheet search matches "MacNativeGames" and "MNG" for all 5 titles.
+        // 3. SupportedGamesSheet search matches "MacNativeGames" and "MNG" for all 12 titles.
         let full = SupportedGames.list(engineRoot: root.path, includeMacNativeGames: true)
-            + [SupportedGame(titleID: "0100000000010000", name: "Super Mario Odyssey", edition: .switch1, version: "1.4.1", notes: "")]
+            + [SupportedGame(titleID: "0100152000022000", name: "Mario Kart 8 Deluxe", edition: .switch1, version: "3.0.3", notes: "")]
         let mngHits = full.filter { SupportedGamesSheet.matchesSearch($0, needle: "MacNativeGames", ownedName: "") }
         let shortHits = full.filter { SupportedGamesSheet.matchesSearch($0, needle: "mng", ownedName: "") }
         XCTAssertEqual(Set(mngHits.map(\.titleID)), MacNativeGamesBuilder.supportedTitleIDs)
         XCTAssertEqual(Set(shortHits.map(\.titleID)), MacNativeGamesBuilder.supportedTitleIDs)
+        XCTAssertEqual(mngHits.count, 12)
 
         // 4. LibraryArtworkState carries MNG upstream flag for built MNG bundles only.
         let mngApp = root.appendingPathComponent("TOTK.app")
@@ -235,7 +241,7 @@ private struct OfflineUpstreamTransport: EngineTransport {
         var libGame = LibraryGame(titleID: "0100F2C0115B6000", name: "TOTK")
         libGame.appPath = mngApp.path
         XCTAssertTrue(LibraryArtworkState(libGame).isMacNativeGames)
-        XCTAssertFalse(LibraryArtworkState(LibraryGame(titleID: "0100000000010000", name: "Odyssey")).isMacNativeGames)
+        XCTAssertFalse(LibraryArtworkState(LibraryGame(titleID: "0100152000022000", name: "Mario Kart 8 Deluxe")).isMacNativeGames)
     }
 
     func testEngineDropdownIncludesNxkitWhenSelectableAndBuildPageUsesTopSwitcher() throws {

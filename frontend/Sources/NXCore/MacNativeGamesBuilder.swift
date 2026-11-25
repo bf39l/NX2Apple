@@ -14,6 +14,28 @@ package enum MacNativeGamesBuilder {
         home + "/Library/Application Support/NX2Apple/tools/uv-python"
     }
 
+    /// True when `path` points inside NX2Apple's MNG-managed `uv-python` store (which must never leak into nxnative/S2Arm builds).
+    package static func isManagedUVPython(_ path: String, home: String = NSHomeDirectory()) -> Bool {
+        guard !path.isEmpty else { return false }
+        let standardized = normalizedPath(path)
+        let resolved = normalizedPath(URL(fileURLWithPath: (path as NSString).expandingTildeInPath).resolvingSymlinksInPath().path)
+        let roots = [
+            normalizedPath(uvPythonDir(home: home)),
+            normalizedPath(URL(fileURLWithPath: uvPythonDir(home: home)).resolvingSymlinksInPath().path),
+        ]
+        for candidate in [standardized, resolved] where !candidate.isEmpty {
+            for root in roots where !root.isEmpty {
+                if candidate == root || candidate.hasPrefix(root + "/") {
+                    return true
+                }
+            }
+            if candidate.contains("/Library/Application Support/NX2Apple/tools/uv-python/") {
+                return true
+            }
+        }
+        return false
+    }
+
     package static func python314InstallCommand(home: String = NSHomeDirectory()) -> [String] {
         let uvBin = uvBinDir(home: home)
         let uvPy = uvPythonDir(home: home)
@@ -68,18 +90,42 @@ package enum MacNativeGamesBuilder {
         return nil
     }
 
+    package static let botwTitleID = "01007EF00011E000"
+
     package static func needsAutoSharedFonts(
         route: Route,
+        titleID: String? = nil,
         gameInput: String,
         isUnencryptedInput: Bool,
         workDir: String,
         fileManager fm: FileManager = .default
     ) -> Bool {
-        guard route == .unifiedBuildApp, !isUnencryptedInput else { return false }
+        guard !isUnencryptedInput else { return false }
         let ext = (gameInput as NSString).pathExtension.lowercased()
-        guard ext != "xci" else { return false }
-        let manifest = workDir + "/totk/extracted/firmware/shared-fonts/manifest.json"
-        return !fm.fileExists(atPath: manifest)
+        let isBOTW = normalizedHex16(titleID) == botwTitleID
+        if (ext == "xci" || ext == "xcz") && !isBOTW {
+            return false
+        }
+        switch route {
+        case .unifiedBuildApp:
+            let manifest = workDir + "/totk/extracted/firmware/shared-fonts/manifest.json"
+            return !fm.fileExists(atPath: manifest)
+        case .perGameScript(let port):
+            guard let relManifest = port.autoSharedFontsManifestRelativePath else { return false }
+            return !fm.fileExists(atPath: workDir + "/" + relManifest)
+        }
+    }
+
+    /// True when `path` is a compressed Switch container that must be pre-decompressed before invoking `route`.
+    /// `build_app.py` handles `.nsz` in its own venv, while `.xcz` and all 7 per-game scripts require pre-unpacked `.nsp`/`.xci`.
+    package static func needsPreDecompress(route: Route, path: String) -> Bool {
+        let ext = (path as NSString).pathExtension.lowercased()
+        switch route {
+        case .unifiedBuildApp:
+            return ext == "xcz"
+        case .perGameScript:
+            return ext == "nsz" || ext == "xcz"
+        }
     }
 
     package static func openFontsArguments(tree: String) -> [String] {
@@ -162,21 +208,135 @@ package enum MacNativeGamesBuilder {
         return (parseOpenFontsOutput(res.out), combined)
     }
 
-    package enum Route: Equatable, Sendable {
-        case unifiedBuildApp
+    /// Per-game port scripts maintained by MNG Launcher (`tools/builder_jobs/build_job.py`).
+    /// CLI flags strictly match each `games/<id>/build.py` `argparse` contract.
+    package enum PerGamePort: String, Equatable, Sendable, CaseIterable {
+        case dread
+        case ss
+        case worldend
+        case tmnt
+        case acnh
+        case eow
+        case odyssey
+
+        package var scriptRelativePath: String {
+            "games/\(rawValue)/build.py"
+        }
+
+        package var supportsUpdate: Bool {
+            switch self {
+            case .dread, .ss, .acnh, .eow, .odyssey:
+                return true
+            case .worldend, .tmnt:
+                return false
+            }
+        }
+
+        package var supportsDLC: Bool {
+            self == .acnh
+        }
+
+        package var supportsSharedFonts: Bool {
+            switch self {
+            case .dread, .tmnt, .acnh, .eow, .odyssey:
+                return true
+            case .ss, .worldend:
+                return false
+            }
+        }
+
+        /// Relative manifest path inside `workDir` for per-game scripts that require `--shared-fonts` on NSP inputs.
+        package var autoSharedFontsManifestRelativePath: String? {
+            switch self {
+            case .acnh:
+                return "fonts/manifest.json"
+            case .eow, .odyssey:
+                return "extracted/firmware/shared-fonts/manifest.json"
+            case .dread, .ss, .worldend, .tmnt:
+                return nil
+            }
+        }
     }
 
-    package static let supportedTitleIDs: Set<String> = [
-        "0100F2C0115B6000",
-        "01007EF00011E000",
-        "0400486024DEC000",
-        "040074A01BF12000",
-        "0400A3A01EE4C000"
+    package enum Route: Equatable, Sendable {
+        case unifiedBuildApp
+        case perGameScript(PerGamePort)
+    }
+
+    package static let unifiedTitleIDs: Set<String> = [
+        "0100F2C0115B6000", // The Legend of Zelda: Tears of the Kingdom
+        "01007EF00011E000", // The Legend of Zelda: Breath of the Wild
+        "0400486024DEC000", // The Legend of Zelda: Ocarina of Time (Switch 2)
+        "040074A01BF12000", // Donkey Kong Bananza (Switch 2)
+        "0400A3A01EE4C000", // Pokémon Pokopia (Switch 2)
     ]
 
-    /// Returns true only when `titleID` normalizes to one of the 5 upstream-maintained MacNativeGames 16-hex IDs.
+    package static let perGameTitleIDs: [String: PerGamePort] = [
+        "010093801237C000": .dread,    // Metroid Dread
+        "01002DA013484000": .ss,       // The Legend of Zelda: Skyward Sword HD
+        "010048900CF64000": .worldend, // WORLDEND SYNDROME
+        "0100FE701475A000": .tmnt,     // Teenage Mutant Ninja Turtles: Shredder's Revenge
+        "01006F8002326000": .acnh,     // Animal Crossing: New Horizons
+        "01008CF01BAAC000": .eow,      // The Legend of Zelda: Echoes of Wisdom
+        "0100000000010000": .odyssey,  // Super Mario Odyssey
+    ]
+
+    package static let supportedTitleIDs: Set<String> = unifiedTitleIDs.union(perGameTitleIDs.keys)
+
+    /// Titles whose MacNativeGames builder accepts `.nup` archives directly.
+    /// Upstream `build_app.py` routes every `.nup` input to Ocarina of Time (`build_oot`), so other Switch 2 titles
+    /// such as Pokopia and Donkey Kong Bananza require an unpacked Switch 2 dump folder.
+    package static let nupSupportedTitleIDs: Set<String> = [
+        "0400486024DEC000", // The Legend of Zelda: Ocarina of Time (Switch 2)
+    ]
+
+    /// Returns true only when `titleID` normalizes to one of the 12 official MacNativeGames 16-hex IDs.
     package static func supportsTitleID(_ titleID: String?) -> Bool {
         normalizedHex16(titleID).map { supportedTitleIDs.contains($0) } ?? false
+    }
+
+    /// True when `path` is a `.nup` archive file or a folder whose Switch 2 input is a `.nup` file.
+    package static func isNUPInputPath(_ path: String?) -> Bool {
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return false }
+        if (raw as NSString).pathExtension.lowercased() == "nup" {
+            return true
+        }
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: raw, isDirectory: &isDir), isDir.boolValue {
+            let resolved = GameFolder.resolve(raw)
+            if (resolved as NSString).pathExtension.lowercased() == "nup" {
+                return true
+            }
+            return !GameFolder.nupFiles(in: resolved).isEmpty
+        }
+        return false
+    }
+
+    /// True when the local MacNativeGames checkout includes generic Switch 2 NUP routing (`tools/nup_input.py`, MNG PR #2339).
+    package static func supportsGenericNUP(in tree: String, fileManager fm: FileManager = .default) -> Bool {
+        let root = normalizedPath(tree)
+        guard !root.isEmpty else { return false }
+        return fm.fileExists(atPath: root + "/tools/nup_input.py")
+    }
+
+    /// True when MacNativeGames supports `titleID` with the given input format (`isNUP` distinguishes `.nup` files from dump folders / XCI / NSP).
+    package static func supportsInput(titleID: String?, isNUP: Bool, tree: String = "", fileManager fm: FileManager = .default) -> Bool {
+        guard let tid = normalizedHex16(titleID), supportedTitleIDs.contains(tid) else { return false }
+        if !isNUP || nupSupportedTitleIDs.contains(tid) {
+            return true
+        }
+        return supportsGenericNUP(in: tree, fileManager: fm)
+    }
+
+    package static func supportsInput(
+        titleID: String?,
+        gameFolder: String? = nil,
+        basePath: String? = nil,
+        tree: String = "",
+        fileManager fm: FileManager = .default
+    ) -> Bool {
+        let isNUP = isNUPInputPath(gameFolder) || isNUPInputPath(basePath)
+        return supportsInput(titleID: titleID, isNUP: isNUP, tree: tree, fileManager: fm)
     }
 
     /// Normalizes a 16-character hexadecimal title ID string, returning nil for empty or non-16-hex values.
@@ -198,13 +358,22 @@ package enum MacNativeGamesBuilder {
         switch route {
         case .unifiedBuildApp:
             return prefix + "build_app.py"
+        case .perGameScript(let port):
+            return prefix + port.scriptRelativePath
         }
     }
 
     package static func route(forTitleID titleID: String?, in tree: String = "", fileManager fm: FileManager = .default) -> Route? {
         _ = tree
         _ = fm
-        return supportsTitleID(titleID) ? .unifiedBuildApp : nil
+        guard let tid = normalizedHex16(titleID) else { return nil }
+        if unifiedTitleIDs.contains(tid) {
+            return .unifiedBuildApp
+        }
+        if let port = perGameTitleIDs[tid] {
+            return .perGameScript(port)
+        }
+        return nil
     }
 
     package static func arguments(
@@ -241,6 +410,20 @@ package enum MacNativeGamesBuilder {
             for dlc in externalDLCs {
                 args += ["--dlc", dlc]
             }
+        case .perGameScript(let port):
+            // Per-game scripts never take `--platform`; emit only flags accepted by each script's argparse.
+            if port.supportsUpdate && includesUpdate {
+                args += ["--update", updatePath]
+            }
+            if port.supportsDLC {
+                for dlc in externalDLCs {
+                    args += ["--dlc", dlc]
+                }
+            }
+            if port.supportsSharedFonts && !sharedFontsPath.isEmpty {
+                args += ["--shared-fonts", sharedFontsPath]
+            }
+            args += ["--work", workDir, "-o", outputAppPath]
         }
         return args
     }
@@ -268,6 +451,46 @@ package enum MacNativeGamesBuilder {
 
     package static func environment(languageCode: String) -> [String: String] {
         ["MNG_LANG": languageCode, "PYTHONUNBUFFERED": "1"]
+    }
+
+    /// Returns a writable `TMPDIR` without spaces for MacNativeGames builds.
+    /// Keeps `<workDir>/.tmp` on the same volume when `workDir` has no spaces, and otherwise falls back to
+    /// `~/Library/Caches/NX2Apple/tmp` (when `home` has no spaces), `systemTempDir`, or `/tmp/nx2apple-mng-tmp`
+    /// — never `~/Library/Application Support/...` because `Application Support` itself contains a space.
+    package static func resolveTemporaryDirectory(
+        workDir: String,
+        home: String = NSHomeDirectory(),
+        systemTempDir: String = NSTemporaryDirectory(),
+        fileManager fm: FileManager = .default
+    ) -> String {
+        func usable(_ candidate: String) -> String? {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains(" ") else { return nil }
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: trimmed, isDirectory: &isDir) {
+                return isDir.boolValue ? trimmed : nil
+            }
+            guard (try? fm.createDirectory(atPath: trimmed, withIntermediateDirectories: true)) != nil,
+                  fm.fileExists(atPath: trimmed, isDirectory: &isDir),
+                  isDir.boolValue else {
+                return nil
+            }
+            return trimmed
+        }
+
+        if !workDir.isEmpty, let sameVolume = usable(workDir + "/.tmp") {
+            return sameVolume
+        }
+        if !home.isEmpty, let caches = usable(home + "/Library/Caches/NX2Apple/tmp") {
+            return caches
+        }
+        if let sys = usable(systemTempDir) {
+            return sys
+        }
+        if let fallback = usable("/tmp/nx2apple-mng-tmp") {
+            return fallback
+        }
+        return "/tmp"
     }
 
     package static func lastError(in log: String) -> String? {

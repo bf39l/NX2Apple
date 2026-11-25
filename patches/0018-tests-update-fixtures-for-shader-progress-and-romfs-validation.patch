@@ -15,7 +15,7 @@ Issue: LNPANDY/NX2Apple#861
  2 files changed, 15 insertions(+), 4 deletions(-)
 
 diff --git a/dm/gfx/tests/test_dmsh_pairs.py b/dm/gfx/tests/test_dmsh_pairs.py
-index 5884467..02f668a 100644
+index 57f770f..d9dc13b 100644
 --- a/dm/gfx/tests/test_dmsh_pairs.py
 +++ b/dm/gfx/tests/test_dmsh_pairs.py
 @@ -15,14 +15,16 @@ import unittest
@@ -49,7 +49,7 @@ index 5884467..02f668a 100644
          for key, loc in [('f0', 0), ('f1', 1), ('f6', 6)]:
              src = pixel(loc)
              if not loc: src = src.replace('    float4 missing [[user(locn0)]];\n', '').replace('in.v0 + in.missing', 'in.v0')
-@@ -93,6 +96,12 @@ class Pairing(unittest.TestCase):
+@@ -97,6 +100,12 @@ class Pairing(unittest.TestCase):
          self.assertEqual(src.count('float4 v0 [[user(locn0)]];'), 1)
          self.assertEqual(self.ns['vs_pad']('v', src), (src, []))
  
@@ -63,7 +63,7 @@ index 5884467..02f668a 100644
          self.g.table('pso_pairs.tsv').write_text('v\tf6\n')
          self.assertEqual(self.ns['load_pairs'](self.g, self.package), {'v': {'f0', 'f6'}})
 diff --git a/dm/ios/tests/test_xcode_workflow.py b/dm/ios/tests/test_xcode_workflow.py
-index da10939..a8fb884 100644
+index f60dbe4..bf7dbe7 100644
 --- a/dm/ios/tests/test_xcode_workflow.py
 +++ b/dm/ios/tests/test_xcode_workflow.py
 @@ -20,6 +20,7 @@ import game
@@ -74,7 +74,7 @@ index da10939..a8fb884 100644
  import xcode_projects
  
  
-@@ -49,6 +50,7 @@ class XcodePipelineTests(unittest.TestCase):
+@@ -50,6 +51,7 @@ class XcodePipelineTests(unittest.TestCase):
              extraction = root / 'extracted' / version
              (extraction / 'RomFS').mkdir(parents=True)
              (extraction / 'ExeFS').mkdir()
@@ -82,7 +82,7 @@ index da10939..a8fb884 100644
              def fake_run(cmd, log, **kwargs):
                  log.parent.mkdir(parents=True, exist_ok=True)
                  log.write_text('')  # a successful command with no diagnostic output
-@@ -84,7 +86,7 @@ class XcodePipelineTests(unittest.TestCase):
+@@ -85,7 +87,7 @@ class XcodePipelineTests(unittest.TestCase):
                                        '--language', 'ja', '--no-show-fps', '--no-motion', '--progress', 'json'])
              finally:
                  progress.close()

@@ -76,6 +76,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
                 }
                 enforceUpstreamForCurrentGame()
                 dropFailureOfOtherGame()
+                probeBasePackageTitleIDIfNeeded()
             }
         }
     }
@@ -94,6 +95,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
                 invalidateKeyProblem()
                 enforceUpstreamForCurrentGame()
                 dropFailureOfOtherGame()
+                probeBasePackageTitleIDIfNeeded()
             }
         }
     }
@@ -108,8 +110,14 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     @Published package var running = false {
         didSet {
             if !running, !buildingGame { runningTarget = target }
-            if !running { completedOperation = operation?.kind; operation = nil }
-            if !running, oldValue { applyPendingNxkitSwitch() }   // an nxkit update waits for the build (BuildStore+Nxkit.swift)
+            if !running {
+                completedOperation = operation?.kind
+                operation = nil
+            }
+            if !running, oldValue {
+                applyPendingNxkitSwitch()   // an nxkit update waits for the build (BuildStore+Nxkit.swift)
+                enforceUpstreamForCurrentGame()
+            }
         }
     }
     /// What runs right now: operation, game and destination, taken when the work starts and independent of the Build form
@@ -171,6 +179,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
             }
             if !running { runningTarget = target }
             if oldValue != target { targetChanged() }
+            refreshSeenShadersInfo()
         }
     }
     /// The target of the operation currently running (or last run), so an iPhone re-sign, reinstall, export or data copy started while
@@ -186,17 +195,25 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     @Published package var bcOnCPU: Bool {
         didSet { defaults.set(bcOnCPU, forKey: Self.bcOnCPUKey) }
     }
+    @Published package var seenShadersOnly: Bool { didSet { defaults.set(seenShadersOnly, forKey: Self.seenShadersOnlyKey) } }
+    @Published package var iosSeenShadersOnly: Bool { didSet { defaults.set(iosSeenShadersOnly, forKey: Self.iosSeenShadersKey) } }
+    @Published package internal(set) var cachedSeenShaders: SeenShadersInfo?
+    @Published package internal(set) var queueHasIOSSeenShadersEligible = false
+    var seenShadersProbe = SeenShadersProbeState()
     /// The prod.keys chosen once for every game (Settings, "Keys", #996): a build whose keys row is empty or names a file that is gone
     /// takes it (BuildStore+SavedKeys.swift). Empty when none is saved.
     @Published package internal(set) var savedKeys: String {
         didSet {
             if savedKeys.isEmpty { defaults.removeObject(forKey: Self.savedKeysKey) } else { defaults.set(savedKeys, forKey: Self.savedKeysKey) }
-            if savedKeys != oldValue { invalidateKeyProblem() }
+            if savedKeys != oldValue {
+                invalidateKeyProblem()
+                probeBasePackageTitleIDIfNeeded()
+            }
         }
     }
     @Published package var buildUpstream: EngineUpstreamKind {
         didSet {
-            if !running && MacNativeGamesBuilder.featureEnabled && buildUpstream == .macNativeGames && isMNGBlockedByCurrentGame {
+            if !running && buildUpstream.enforcedTitleIDs != nil && isUpstreamBlockedByCurrentGame(buildUpstream) {
                 buildUpstream = .nxnative
                 return
             }
@@ -210,6 +227,8 @@ func hop(_ body: @escaping @MainActor () -> Void) {
             if oldValue != buildUpstream {
                 upstreamChanged()
             }
+            refreshSeenShadersInfo()
+            refreshQueueSeenShadersEligibility()
         }
     }
     @Published package var macNativeGamesPath: String {
@@ -217,10 +236,31 @@ func hop(_ body: @escaping @MainActor () -> Void) {
             defaults.set(macNativeGamesPath, forKey: Self.macNativeGamesPathKey)
             macNativeGamesInstalled = MacNativeGamesBuilder.isUsableTree(macNativeGamesPath)
             refreshUpstreamLocalVersion(for: .macNativeGames)
+            let blocksMNG = queue?.queued.contains { !Self.canQueueEntryUseMNG($0, tree: macNativeGamesPath) } ?? false
+            if queueBlocksMNG != blocksMNG { queueBlocksMNG = blocksMNG }
+            enforceUpstreamForCurrentGame()
         }
     }
     @Published package internal(set) var macNativeGamesInstalled = false
     package var mngRun = false
+    @Published package var kidWithSwordPath: String {
+        didSet {
+            defaults.set(kidWithSwordPath, forKey: Self.kidWithSwordPathKey)
+            kidWithSwordInstalled = UpstreamEngineStore.isUsableTree(kidWithSwordPath, kind: .kidWithSword)
+            refreshUpstreamLocalVersion(for: .kidWithSword)
+        }
+    }
+    @Published package internal(set) var kidWithSwordInstalled = false
+    @Published package var noLagKartPath: String {
+        didSet {
+            defaults.set(noLagKartPath, forKey: Self.noLagKartPathKey)
+            noLagKartInstalled = UpstreamEngineStore.isUsableTree(noLagKartPath, kind: .noLagKart)
+            refreshUpstreamLocalVersion(for: .noLagKart)
+        }
+    }
+    @Published package internal(set) var noLagKartInstalled = false
+    /// Engine kind used by the active or most recently completed build run.
+    package var activeBuildUpstream: EngineUpstreamKind = .nxnative
     @Published package var s2armPath: String {
         didSet {
             defaults.set(s2armPath, forKey: Self.s2armPathKey)
@@ -270,13 +310,10 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     package var lastBuildCommand: [String] = []   // this session's last build, for Copy diagnostics (Diagnostics.swift)
 
     // ---- Installing on an iPhone or iPad (Xcode with a development certificate) ----
-    // Optional: with a paired device and a signing team chosen, the script prepares the game's Xcode project
-    // (--prepare-xcode, the route its README gives developers), xcodebuild signs it for that device with the
-    // team (Xcode makes the provisioning profile) without the game files, devicectl installs it and copies the game's
-    // folder (romfs.img, aoc/) into its Documents, as a sideloaded copy has it. Without a device or a team the build stays an unsigned IPA, as before.
     @Published package var installedDataComplete: Bool?
     @Published package var installedOn = "" { didSet { installedDataComplete = nil } }       // the device the last build went to (its UDID)
     @Published package var installedAppPath = ""  // the signed app that went there
+    @Published package var shellUpdatedOnDevice = false
     @Published package var exportedIPAPath = ""   // the unsigned IPA of an export (#416)
     @Published package var send: DataSend = .idle {  // step 3 of the export: the game data on its way (BuildStore+Send.swift)
         didSet {
@@ -304,6 +341,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     let installCancel = LockedFlag()
     var installPhaseActive = false
     package var fastRefreshActive = false
+    package var lastRunWasFastRefresh = false
     package var fastRefreshTitleID: String? = nil {
         didSet {
             if fastRefreshTitleID != oldValue {
@@ -339,22 +377,46 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     package weak var queue: BuildQueueStore? {
         didSet {
             queue?.macOnly = { [weak self] in self?.isMacOnlyUpstreamSelected ?? false }
+            queue?.bindUpstreamProvider(
+                currentUpstream: { [weak self] in self?.buildUpstream ?? .nxnative },
+                defaultKeysPath: { [weak self] in self?.keysPath ?? "" },
+                readPackageTitleID: { [weak self] path, keys in
+                    let reader = self?.readPackageTitleID ?? { PackageHeaderTitleID.readHex16(path: $0, keysPath: $1) }
+                    return reader(path, keys)
+                },
+                mngTreePath: { [weak self] in self?.macNativeGamesPath ?? "" }
+            )
             queueHasIOS = queue?.hasIOS ?? false
             let count = queue?.games.filter(\.waiting).count ?? 0
             if queuedCount != count { queuedCount = count }
+            let blocksMNG = queue?.queued.contains { !Self.canQueueEntryUseMNG($0, tree: macNativeGamesPath) } ?? false
+            if queueBlocksMNG != blocksMNG { queueBlocksMNG = blocksMNG }
+            enforceUpstreamForCurrentGame()
+            refreshQueueSeenShadersEligibility(entries: queue?.entries ?? [])
             queueSubscription = queue?.$entries.sink { [weak self] entries in
-                self?.queueHasIOS = entries.contains { $0.status == .queued && $0.target != BuildTarget.mac }
+                guard let self else { return }
+                let queuedEntries = entries.filter { $0.status == .queued }
+                self.queueHasIOS = queuedEntries.contains { BuildTarget.normalized($0.target) != BuildTarget.mac }
                 let next = QueueGame.grouped(entries).filter(\.waiting).count
-                if self?.queuedCount != next { self?.queuedCount = next }
+                if self.queuedCount != next { self.queuedCount = next }
+                let nextBlocksMNG = queuedEntries.contains { !Self.canQueueEntryUseMNG($0, tree: self.macNativeGamesPath) }
+                if self.queueBlocksMNG != nextBlocksMNG { self.queueBlocksMNG = nextBlocksMNG }
+                self.enforceUpstreamForCurrentGame()
+                self.refreshQueueSeenShadersEligibility(entries: entries)
             }
         }
     }
     @Published package private(set) var queueHasIOS = false
     @Published package private(set) var queuedCount = 0
+    @Published package private(set) var queueBlocksMNG = false
+    package var activeQueueEntryUpstream: EngineUpstreamKind? = nil
+    var packageHeaderProbeGeneration: UInt64 = 0
+    package var readPackageTitleID: @Sendable (_ path: String, _ keysPath: String) -> String? = {
+        PackageHeaderTitleID.readHex16(path: $0, keysPath: $1)
+    }
     private var queueSubscription: AnyCancellable?
     /// The running send of each transfer asks this flag whether it was cancelled.
     var transferCancels: [UUID: LockedFlag] = [:]
-    /// A queued shared-app batch builds each game and packages or installs the app once at the end (#997).
     package var deferShellPackaging = false
     var deferredExportsIPA = false
     package var queuedExportIPA: Bool?
@@ -363,7 +425,13 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     var skipStaleCheckForQueuedEntry = false
     var afterStaleFrameworks: (() -> Void)?
     package var activeQueuedGameID: UUID?
-    /// Stop was pressed during the running work (the queue pauses after it). Cleared when the next build starts.
+    package var activeQueuedEntryID: UUID?
+    package var activeQueuedArchivePath: String?
+    package var activeQueuedRebuildsShaders = false
+    package var activeRunStartedAt: Date?
+    package var activeRunRebuiltShaders = false
+    @Published package var refreshCompletionSummary: RefreshCompletionSummary?
+    @Published package var pendingRefreshNotice: RefreshCompletionSummary?
     package var stoppedByPlayer = false
     var deferredShell: [DeferredShellGame] = []
     package var pickedArtworkForTitleID: (String) -> String? = { _ in nil }
@@ -447,18 +515,26 @@ func hop(_ body: @escaping @MainActor () -> Void) {
         target = savedTarget
         runningTarget = savedTarget
         bcOnCPU = defaults.bool(forKey: Self.bcOnCPUKey)
+        seenShadersOnly = defaults.bool(forKey: Self.seenShadersOnlyKey)
+        iosSeenShadersOnly = defaults.bool(forKey: Self.iosSeenShadersKey)
         savedKeys = defaults.string(forKey: Self.savedKeysKey) ?? ""
         let savedMNGPath = defaults.string(forKey: Self.macNativeGamesPathKey) ?? ""
         let savedS2ArmPath = defaults.string(forKey: Self.s2armPathKey) ?? ""
+        let savedKWSPath = defaults.string(forKey: Self.kidWithSwordPathKey) ?? ""
+        let savedNLKPath = defaults.string(forKey: Self.noLagKartPathKey) ?? ""
         macNativeGamesPath = savedMNGPath
         s2armPath = savedS2ArmPath
+        kidWithSwordPath = savedKWSPath
+        noLagKartPath = savedNLKPath
         macNativeGamesInstalled = MacNativeGamesBuilder.isUsableTree(savedMNGPath)
         s2armInstalled = S2ArmBuilder.isUsableTree(savedS2ArmPath)
+        kidWithSwordInstalled = UpstreamEngineStore.isUsableTree(savedKWSPath, kind: .kidWithSword)
+        noLagKartInstalled = UpstreamEngineStore.isUsableTree(savedNLKPath, kind: .noLagKart)
         if let rawUpstream = defaults.string(forKey: Self.buildUpstreamKey),
            let parsedUpstream = EngineUpstreamKind(rawValue: rawUpstream) {
             switch parsedUpstream {
-            case .nxnative:
-                buildUpstream = .nxnative
+            case .nxnative, .kidWithSword, .noLagKart:
+                buildUpstream = parsedUpstream
             case .macNativeGames:
                 buildUpstream = MacNativeGamesBuilder.featureEnabled ? .macNativeGames : .nxnative
             case .s2arm:
@@ -483,9 +559,9 @@ func hop(_ body: @escaping @MainActor () -> Void) {
 
     /// This iPhone build goes straight to a device.
     /// An iPhone or iPad build that makes the shared app as an unsigned IPA (#416): no device, no team.
-    package var exportsShell: Bool { target != BuildTarget.mac && (queuedExportIPA ?? devices.exportIPA) }
+    package var exportsShell: Bool { target != BuildTarget.mac && (buildUpstream.buildsIOSStandaloneOnly || (queuedExportIPA ?? devices.exportIPA)) }
     /// An export of one game's own IPA with the game data inside (#540): the engine's one-game app, no shared app, nothing to send.
-    package var exportsOneGame: Bool { exportsShell && (queuedExportOneGame ?? devices.exportOneGame) }
+    package var exportsOneGame: Bool { target != BuildTarget.mac && (buildUpstream.buildsIOSStandaloneOnly || (exportsShell && (queuedExportOneGame ?? devices.exportOneGame))) }
     /// An export of a standalone `.framework` for the shared app: no shell IPA build or repack, game data still sent separately.
     package var exportsFramework: Bool { exportsShell && !exportsOneGame && (queuedExportFramework ?? devices.exportFramework) }
     package var installsDirectly: Bool { target != BuildTarget.mac && !devices.installDevice.isEmpty && !devices.signingTeam.isEmpty }
@@ -551,6 +627,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
         fastRefreshExternalImgPath = nil
         needsReplaceOldImgReminder = false
         updatedImgPath = ""
+        shellUpdatedOnDevice = false
         stopPSOPoll()
         stages = []
         log.clear()
@@ -558,164 +635,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
 
     package func markAllDone() {
         stopPSOPoll()
-        for i in stages.indices where stages[i].state != .failed {
-            stages[i].state = .done
-        }
-    }
-
-    private static func isPSOStage(_ name: String) -> Bool {
-        name == "Pipeline archive" || name == "game framework"
-    }
-
-    // MARK: Output parsing
-
-    package func say(_ s: String) { append(s + "\n") }
-    package func append(_ s: String) { log.append(s) }
-
-    /// Split into lines (the pipe delivers arbitrary chunks) and turn the script's progress into the stage list.
-    /// `--progress json` writes one event per line (stage, step, progress with done / total / frac / eta, stage_end,
-    /// say), a count change at most every half second, and anything else on the pipe (a tool's traceback) is log text.
-    /// The older `--progress lines` form is still understood:
-    ///   [12:00:01] [2/7] extract v720896 …
-    ///   [12:00:20] ✓ [2/7] extract v720896 (0:19): 30,000 files, 3.4 GB
-    package func ingest(_ chunk: String) {
-        for line in log.feed(chunk) { handle(line) }
-    }
-
-    package func flushLines() {
-        if let rest = log.flush() { handle(rest) }
-    }
-
-    package func handle(_ line: String) {
-        if line.hasPrefix("{"), let data = line.data(using: .utf8),
-           let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let kind = event["ev"] as? String {
-            return handleEvent(kind, event)
-        }
-        append(line + "\n")
-        guard let s = BuildProgress.parseStageWithTotal(line) else {
-            if mngRun || s2armRun { handleExternalUpstreamLogLine(line) }
-            return
-        }
-        if s.state == .running {
-            if Self.isPSOStage(s.name) {
-                if s.percent != nil {
-                    psoPollGeneration &+= 1
-                    psoNativeProgress = true
-                    psoPollTask?.cancel()
-                    psoPollTask = nil
-                } else if psoStageID != s.k {
-                    startPSOPoll(stageID: s.k, step: "")
-                }
-            } else if psoStageID == s.k {
-                stopPSOPoll()
-            }
-        } else if psoStageID == s.k {
-            stopPSOPoll()
-        }
-        if let i = stages.firstIndex(where: { $0.id == s.k }) {
-            if !s.name.isEmpty { stages[i].name = s.name }
-            if s.state != .pending { stages[i].state = s.state }
-            let keepPSOPoll = (s.state == .running && s.percent == nil && psoStageID == s.k && !psoNativeProgress && stages[i].percent != nil)
-            if !keepPSOPoll {
-                if !s.detail.isEmpty { stages[i].detail = s.detail }
-                stages[i].percent = s.percent
-            }
-        } else if s.state != .pending {
-            stages.append(Stage(id: s.k, name: s.name, state: s.state, detail: s.detail, percent: s.percent, started: Date()))
-            stages.sort { $0.id < $1.id }
-        }
-        refreshOverallProgress(parsedTotal: s.n)
-    }
-
-    /// The `shaders_stale` event: the cached shader libraries cannot be reused and this build rebuilds them, because the
-    /// shader translator changed (`reason` "chain") or the game profile's shader inputs did ("inputs").
-    /// The progress card keeps the explanation visible without waiting for an acknowledgment (#862).
-    /// Once per build: the script sends the event once per shader step. A reason a newer script adds shows nothing: no text explains it.
-    package func noteStaleShaders(reason: String) {
-        guard let text = ["chain": "msg.shadersStale.chain", "inputs": "msg.shadersStale.inputs"][reason], staleShadersMessageKey == nil else { return }
-        staleShadersMessageKey = text
-    }
-
-    /// One event of `--progress json`: the stage list follows it, and the log gets a readable line (no count updates).
-    package func handleEvent(_ kind: String, _ e: [String: Any]) {
-        let k = (e["k"] as? NSNumber)?.intValue ?? 0
-        func stage(_ update: (inout Stage) -> Void) {
-            if let i = stages.firstIndex(where: { $0.id == k }) {
-                update(&stages[i])
-            } else {
-                var s = Stage(id: k, name: e["name"] as? String ?? "")
-                update(&s)
-                stages.append(s)
-                stages.sort { $0.id < $1.id }
-            }
-        }
-        switch kind {
-        case "stage":
-            let name = e["name"] as? String ?? "", step = e["step"] as? String ?? ""
-            let n = (e["n"] as? NSNumber)?.intValue ?? 0
-            append("[\(k)/\(n)] \(name)" + (step.isEmpty ? "" : " · \(step)") + " …\n")
-            stage {
-                $0.name = name
-                $0.state = .running
-                $0.started = Date()
-                $0.detail = step
-                $0.percent = nil
-                $0.eta = nil
-                $0.isScanningLastShaderFiles = false
-            }
-            if Self.isPSOStage(name) { startPSOPoll(stageID: k, step: step) }
-            else if psoStageID == k { stopPSOPoll() }
-            refreshOverallProgress(parsedTotal: n)
-        case "step":
-            let step = e["step"] as? String ?? ""
-            append("    · \(step)\n")
-            stage {
-                $0.detail = step
-                $0.percent = nil
-                $0.eta = nil
-                $0.isScanningLastShaderFiles = false
-            }
-            if step.hasPrefix("pipeline archive") { startPSOPoll(stageID: k, step: step) }
-            else if psoStageID == k { stopPSOPoll() }
-            refreshOverallProgress(parsedTotal: nil)
-        case "progress":
-            let fraction = (e["frac"] as? NSNumber)?.doubleValue
-            let done = (e["done"] as? NSNumber)?.intValue
-            if psoStageID == k, fraction != nil || done != nil {
-                psoPollGeneration &+= 1
-                psoNativeProgress = true
-                psoPollTask?.cancel()
-                psoPollTask = nil
-            }
-            let detail = BuildProgress.progressDetail(e)
-            let eta = (e["eta"] as? NSNumber)?.doubleValue
-            stage {
-                $0.percent = fraction.map { $0 * 100 }
-                $0.detail = detail
-                $0.eta = eta
-                $0.etaAt = eta == nil ? nil : Date()
-                $0.isScanningLastShaderFiles = BuildProgress.isScanningLastShaderFiles(e)
-            }
-            refreshOverallProgress(parsedTotal: nil)
-        case "stage_end":
-            if psoStageID == k { stopPSOPoll() }
-            let ok = e["ok"] as? Bool ?? true, summary = e["summary"] as? String ?? ""
-            let elapsed = BuildProgress.duration((e["elapsed"] as? NSNumber)?.doubleValue ?? 0)
-            append("\(ok ? "✓" : "✗") \(e["name"] as? String ?? "") (\(elapsed))" + (summary.isEmpty ? "" : ": \(summary)") + "\n")
-            stage {
-                $0.state = ok ? .done : .failed
-                $0.detail = summary
-                $0.percent = ok ? 100 : $0.percent
-                $0.eta = nil
-                $0.isScanningLastShaderFiles = false
-            }
-            refreshOverallProgress(parsedTotal: nil)
-        case "say":
-            let msg = e["msg"] as? String ?? ""
-            append(msg + "\n")
-        case "shaders_stale":
-            noteStaleShaders(reason: e["reason"] as? String ?? "")
-        default: break
-        }
+        BuildPlan.markScriptStagesDone(in: &stages)
+        reconcileScriptStageTotal()
     }
 }

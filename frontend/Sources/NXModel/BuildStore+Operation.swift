@@ -8,16 +8,20 @@ extension BuildStore {
     /// Where the work goes, as the store knows it when the work starts.
     package enum OperationPlace {
         case target
+        case device(String)
         case folder
         case none
     }
 
-    func beginOperation(_ kind: ActiveOperation.Kind, game: String?, titleID: String?, destination place: OperationPlace) {
+    package func beginOperation(_ kind: ActiveOperation.Kind, game: String?, titleID: String?, destination place: OperationPlace) {
+        clearInstallRecovery()
         var destination: ActiveOperation.Destination?
         switch place {
         case .target:
             if runningTarget == BuildTarget.mac { destination = .thisMac }
             else if !devices.installDevice.isEmpty { destination = .device(devices.deviceName(devices.installDevice)) }
+        case .device(let name):
+            if !name.isEmpty { destination = .device(name) }
         case .folder:
             let name = (devices.driveFolder as NSString).lastPathComponent
             if !name.isEmpty { destination = .folder(name) }
@@ -64,15 +68,30 @@ extension BuildStore {
         BuildTarget.normalized(entry.target)
     }
 
+    private func entryForcesStandaloneIOS(_ entry: QueueEntry) -> Bool {
+        guard !entry.fastRefresh, effectiveQueuedTarget(for: entry) != BuildTarget.mac else { return false }
+        return (entry.upstream ?? buildUpstream).buildsIOSStandaloneOnly
+    }
+
     private var queueHasIOSTarget: Bool {
         guard hasQueuedBuilds else { return false }
         guard !skipsQueuedIOS else { return false }
         return queue?.queued.contains { effectiveQueuedTarget(for: $0) != BuildTarget.mac } ?? false
     }
 
+    /// True when the staged queue holds at least one iOS entry that uses the shared shell or direct device install
+    /// (excluding standalone-only variants like Kid with Sword that always export a one-game IPA).
+    private var queueHasSharedIOSTarget: Bool {
+        guard hasQueuedBuilds else { return false }
+        guard !skipsQueuedIOS else { return false }
+        return queue?.queued.contains {
+            effectiveQueuedTarget(for: $0) != BuildTarget.mac && !entryForcesStandaloneIOS($0)
+        } ?? false
+    }
+
     /// True when a staged queue targets iPhone/iPad direct install without a device and signing team chosen yet.
     package var queueNeedsDevice: Bool {
-        queueHasIOSTarget && !iosExportsShell && !iosInstallsDirectly
+        queueHasSharedIOSTarget && !iosExportsShell && !iosInstallsDirectly
     }
 
     /// Whether the Build page's primary Start button (or step 1's Build & export) can start right now.
@@ -112,7 +131,11 @@ extension BuildStore {
         archivePath = ""
         needsReplaceOldImgReminder = false
         updatedImgPath = ""
+        refreshCompletionSummary = nil
+        pendingRefreshNotice = nil
+        shellUpdatedOnDevice = false
         completedOperation = nil
+        clearInstallRecovery(includeFastRefresh: true)
     }
 
     /// Starts the staged jobs on their saved platforms with the chosen iOS install/export mode, or starts a single-game build when no
@@ -127,7 +150,8 @@ extension BuildStore {
                 return
             }
             let hasIOS = queueHasIOSTarget
-            if hasIOS, iosPackagesSharedApp {
+            let hasSharedIOS = queueHasSharedIOSTarget
+            if hasSharedIOS, iosPackagesSharedApp {
                 if let why = shellRootProblem() {
                     doneNote = why
                     done = false
@@ -135,7 +159,7 @@ extension BuildStore {
                 }
                 let rebuilding = Set(
                     queue.queued
-                        .filter { effectiveQueuedTarget(for: $0) != BuildTarget.mac }
+                        .filter { effectiveQueuedTarget(for: $0) != BuildTarget.mac && !entryForcesStandaloneIOS($0) }
                         .map(\.titleID)
                 )
                 if askAboutStaleFrameworks(except: rebuilding, then: { [weak self] in self?.startBuildOrQueue() }) {
@@ -143,11 +167,11 @@ extension BuildStore {
                 }
             }
             clearUnstartedDraft()
-            let packageOnce = hasIOS && iosPackagesSharedApp
-            let batchExportsIPA: Bool? = hasIOS ? iosExportsShell : nil
-            let batchExportsFramework: Bool? = hasIOS ? iosExportsFramework : nil
-            let destination = (!hasIOS || iosExportsShell) ? nil : devices.deviceName(devices.installDevice)
-            if hasIOS {
+            let packageOnce = hasSharedIOS && iosPackagesSharedApp
+            let batchExportsIPA: Bool? = hasSharedIOS ? iosExportsShell : (hasIOS ? true : nil)
+            let batchExportsFramework: Bool? = hasSharedIOS ? iosExportsFramework : (hasIOS ? false : nil)
+            let destination = (!hasSharedIOS || iosExportsShell) ? nil : devices.deviceName(devices.installDevice)
+            if hasSharedIOS {
                 deferredExportsIPA = iosExportsShell
             }
             if deferredShell.isEmpty {
@@ -164,21 +188,70 @@ extension BuildStore {
     package func startQueued(_ entry: QueueEntry) -> String? {
         guard !running else { return t("queue.cannotStart") }
         activeQueuedGameID = entry.gameID
+        activeQueuedEntryID = entry.id
+        activeQueuedArchivePath = entry.archivePath
+        activeQueuedRebuildsShaders = entry.rebuildsShaders
         let normalizedTarget = BuildTarget.normalized(entry.target)
-        let trimmedTitleID = entry.titleID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if buildUpstream == .macNativeGames,
-           normalizedTarget != BuildTarget.mac || (!trimmedTitleID.isEmpty && !MacNativeGamesBuilder.supportsTitleID(trimmedTitleID)) {
-            buildUpstream = .nxnative
+        var resolvedTitleID = entry.titleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if MacNativeGamesBuilder.normalizedHex16(resolvedTitleID) == nil,
+           !entry.fastRefresh,
+           let base = entry.inputs["base"]?.first,
+           !base.isEmpty {
+            if let parsed = TitleID.parse(base) {
+                resolvedTitleID = String(format: "%016llX", parsed)
+            } else {
+                let entryKeys = entry.inputs["keys"]?.first ?? ""
+                let effectiveKeys = entryKeys.isEmpty ? keysPath : entryKeys
+                if !effectiveKeys.isEmpty, let headerID = readPackageTitleID(base, effectiveKeys),
+                   let normalized = MacNativeGamesBuilder.normalizedHex16(headerID) {
+                    resolvedTitleID = normalized
+                }
+            }
         }
         if skipsQueuedIOS, normalizedTarget != BuildTarget.mac {   // queued for iOS before nxkit was chosen
             activeQueuedGameID = nil
             return t(macOnlyNoteKey)
         }
+        let targetUpstream: EngineUpstreamKind = {
+            if entry.fastRefresh { return .nxnative }
+            let requested = entry.upstream ?? buildUpstream
+            switch requested {
+            case .macNativeGames:
+                let allowed = MacNativeGamesBuilder.featureEnabled
+                    && macNativeGamesInstalled
+                    && normalizedTarget == BuildTarget.mac
+                    && MacNativeGamesBuilder.supportsInput(
+                        titleID: resolvedTitleID,
+                        gameFolder: entry.gameFolder,
+                        basePath: entry.inputs["base"]?.first,
+                        tree: macNativeGamesPath
+                    )
+                return allowed ? .macNativeGames : .nxnative
+            case .kidWithSword:
+                let allowed = kidWithSwordInstalled
+                    && EngineUpstreamKind.kidWithSword.supportsTitleID(resolvedTitleID)
+                return allowed ? .kidWithSword : .nxnative
+            case .noLagKart:
+                let allowed = noLagKartInstalled
+                    && normalizedTarget == BuildTarget.mac
+                    && EngineUpstreamKind.noLagKart.supportsTitleID(resolvedTitleID)
+                return allowed ? .noLagKart : .nxnative
+            case .nxkit:
+                return normalizedTarget == BuildTarget.mac ? .nxkit : .nxnative
+            case .nxnative, .s2arm:
+                return requested
+            }
+        }()
         if !entry.outputDirectory.isEmpty {
             outDir = entry.outputDirectory
         }
         target = normalizedTarget
-        if normalizedTarget != BuildTarget.mac, let entryExport = entry.exportIPA {
+        let standaloneIOS = normalizedTarget != BuildTarget.mac && targetUpstream.buildsIOSStandaloneOnly
+        if standaloneIOS {
+            queuedExportIPA = true
+            queuedExportOneGame = true
+            queuedExportFramework = false
+        } else if normalizedTarget != BuildTarget.mac, let entryExport = entry.exportIPA {
             queuedExportIPA = entryExport
             if entry.exportFramework == true && entryExport {
                 queuedExportOneGame = false
@@ -192,12 +265,17 @@ extension BuildStore {
             queuedExportOneGame = nil
             queuedExportFramework = nil
         }
-        deferShellPackaging = entry.packageAfter && normalizedTarget != BuildTarget.mac && !exportsOneGame && !exportsFramework
-        if deferShellPackaging {
-            deferredExportsIPA = entry.exportIPA ?? exportsShell
-        }
+        queuedIOSSeenShaders = normalizedTarget != BuildTarget.mac ? entry.iosSeenShaders : nil
 
         if entry.fastRefresh {
+            deferShellPackaging = entry.packageAfter && normalizedTarget != BuildTarget.mac && !exportsOneGame && !exportsFramework
+            if deferShellPackaging {
+                deferredExportsIPA = entry.exportIPA ?? exportsShell
+            }
+            activeQueueEntryUpstream = .nxnative
+            if buildUpstream != .nxnative {
+                buildUpstream = .nxnative
+            }
             hintedTitleID = nil
             let explicitOutDir: String? = {
                 if !entry.outputDirectory.isEmpty { return entry.outputDirectory }
@@ -218,14 +296,21 @@ extension BuildStore {
                 outDir: explicitOutDir,
                 gameName: entry.name.isEmpty ? nil : entry.name,
                 existingMacAppPath: entry.existingAppPath,
-                externalImgPath: entry.externalImgPath
+                externalImgPath: entry.externalImgPath,
+                knownArchivePath: entry.archivePath,
+                forceShaderRebuildTrailer: entry.rebuildsShaders
             )
             if running { return nil }
+            activeQueueEntryUpstream = nil
             queuedExportIPA = nil
             queuedExportOneGame = nil
             queuedExportFramework = nil
+            queuedIOSSeenShaders = nil
             deferShellPackaging = false
             activeQueuedGameID = nil
+            activeQueuedEntryID = nil
+            activeQueuedArchivePath = nil
+            activeQueuedRebuildsShaders = false
             return doneNote.isEmpty ? t("queue.cannotStart") : doneNote
         }
 
@@ -239,7 +324,15 @@ extension BuildStore {
             }
             gameDir = (basePath as NSString).deletingLastPathComponent
         }
-        applyKnownTitleID(trimmedTitleID)
+        applyKnownTitleID(resolvedTitleID)
+        activeQueueEntryUpstream = targetUpstream
+        if buildUpstream != targetUpstream {
+            buildUpstream = targetUpstream
+        }
+        deferShellPackaging = !standaloneIOS && entry.packageAfter && normalizedTarget != BuildTarget.mac && !exportsOneGame && !exportsFramework
+        if deferShellPackaging {
+            deferredExportsIPA = entry.exportIPA ?? exportsShell
+        }
         if let extImg = entry.externalImgPath?.trimmingCharacters(in: .whitespacesAndNewlines),
            !extImg.isEmpty,
            FileManager.default.fileExists(atPath: extImg) {
@@ -254,13 +347,19 @@ extension BuildStore {
         stages = []
         runBuild()
         if running { return nil }
+        activeQueueEntryUpstream = nil
+        enforceUpstreamForCurrentGame()
         fastRefreshExternalImgPath = nil
         queuedExportIPA = nil
         queuedExportOneGame = nil
         queuedExportFramework = nil
+        queuedIOSSeenShaders = nil
         deferShellPackaging = false
         skipStaleCheckForQueuedEntry = false
         activeQueuedGameID = nil
+        activeQueuedEntryID = nil
+        activeQueuedArchivePath = nil
+        activeQueuedRebuildsShaders = false
         return doneNote.isEmpty ? t("queue.cannotStart") : doneNote
     }
 

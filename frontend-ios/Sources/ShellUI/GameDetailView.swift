@@ -15,9 +15,21 @@ public struct GameDetailView: View {
     @Environment(\.shellAskRestoreBackup) private var askRestoreBackup
     @Environment(\.shellAskHomeScreen) private var askHomeScreen
     @Environment(\.shellAskChangeCover) private var askChangeCover
+    @Environment(\.shellOpenCheats) private var openCheats
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var localRestoreBackup = false
-    @State private var localHomeScreen = false
+    private enum LocalSheet: Identifiable {
+        case restoreBackup
+        case homeScreen
+        case cheats
+        var id: String {
+            switch self {
+            case .restoreBackup: "restoreBackup"
+            case .homeScreen: "homeScreen"
+            case .cheats: "cheats"
+            }
+        }
+    }
+    @State private var localSheet: LocalSheet?
     public init(detail: GameDetail, actions: ShellActions = ShellActions(), showsPrimaryAction: Bool = true, showsHeader: Bool = true, nativeSections: Bool = false) {
         self.detail = detail
         self.actions = actions
@@ -36,48 +48,80 @@ public struct GameDetailView: View {
         }
         .foregroundStyle(.white)
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: sectionRowIDs)
-        .sheet(isPresented: $localRestoreBackup) {
-            if let backup = detail.latestSaveBackup {
-                RestoreSaveBackupView(game: detail.game, backup: backup, restore: {
-                    localRestoreBackup = false
-                    actions.onRestoreSaveBackup(detail.id)
-                }, cancel: {
-                    localRestoreBackup = false
-                })
-                .presentationDetents([.medium])
+        .sheet(item: $localSheet) { sheet in
+            switch sheet {
+            case .restoreBackup:
+                if let backup = detail.latestSaveBackup {
+                    RestoreSaveBackupView(game: detail.game, backup: backup, restore: {
+                        localSheet = nil
+                        actions.onRestoreSaveBackup(detail.id)
+                    }, cancel: {
+                        localSheet = nil
+                    })
+                    .presentationDetents([.medium])
+                    .presentationBackground(ShellPalette.background)
+                }
+            case .homeScreen:
+                ScrollView {
+                    AddToHomeScreenView(
+                        game: detail.game,
+                        supportsFloatingGuide: actions.onAddToHomeScreenWithGuide != nil,
+                        prepareFloatingGuide: { actions.onPrepareHomeScreenGuide?(detail.id) },
+                        cancelPreparedFloatingGuide: { actions.onCancelPreparedHomeScreenGuide?() },
+                        saveAndOpen: { floatingGuide in
+                            if let withGuide = actions.onAddToHomeScreenWithGuide {
+                                return await withGuide(detail.id, floatingGuide)
+                            }
+                            return await actions.onAddToHomeScreen?(detail.id) ?? false
+                        },
+                        copyURL: { actions.onCopyShortcutURL?(detail.id) },
+                        close: { localSheet = nil }
+                    )
+                }
+                .presentationDetents([.medium, .large])
                 .presentationBackground(ShellPalette.background)
+            case .cheats:
+                if actions.supportsCheats {
+                    let placeholder = GameCheatsSnapshot(
+                        gameID: detail.id,
+                        gameTitle: detail.game.title,
+                        buildID: detail.cheatsSummary?.buildID
+                    )
+                    NavigationStack {
+                        CheatsSheetView(snapshot: placeholder, actions: actions, onClose: { localSheet = nil })
+                            .id(detail.id)
+                            .navigationTitle(ShellStrings.text("Cheats"))
+                            #if os(iOS)
+                            .navigationBarTitleDisplayMode(.inline)
+                            #endif
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button(ShellStrings.text("Close")) { localSheet = nil }
+                                }
+                            }
+                    }
+                    .presentationDetents([.large])
+                    .presentationBackground(ShellPalette.background)
+                }
             }
-        }
-        .sheet(isPresented: $localHomeScreen) {
-            ScrollView {
-                AddToHomeScreenView(
-                    game: detail.game,
-                    supportsFloatingGuide: actions.onAddToHomeScreenWithGuide != nil,
-                    prepareFloatingGuide: { actions.onPrepareHomeScreenGuide?(detail.id) },
-                    cancelPreparedFloatingGuide: { actions.onCancelPreparedHomeScreenGuide?() },
-                    saveAndOpen: { floatingGuide in
-                        if let withGuide = actions.onAddToHomeScreenWithGuide {
-                            return await withGuide(detail.id, floatingGuide)
-                        }
-                        return await actions.onAddToHomeScreen?(detail.id) ?? false
-                    },
-                    copyURL: { actions.onCopyShortcutURL?(detail.id) },
-                    close: { localHomeScreen = false }
-                )
-            }
-            .presentationDetents([.medium, .large])
-            .presentationBackground(ShellPalette.background)
         }
     }
     @ViewBuilder private var contents: some View {
         if showsHeader || showsPrimaryAction {
             header.listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
+        if openCheats != nil || actions.supportsCheats {
+            group(ShellStrings.text("Cheats")) {
+                cheatsEntryRow
+                    .id("set.cheats")
+            }
+        }
         ForEach(detail.sections) { section in
             group(section.title) {
                 // The button mapping is one row here and opens a card of its own, as a long choice list does.
                 if section.id == PadMappingRows.sectionID {
                     PadMappingEntryRow(gameID: detail.id, rows: section.rows, targetID: "set.row.padMapping")
+                        .id("set.row.padMapping")
                 } else {
                     ForEach(section.rows) { row in
                         // Equatable on its row: a change re-renders the changed row only, not every row of the game.
@@ -97,6 +141,7 @@ public struct GameDetailView: View {
                     GameSettingsGlassButton(title: ShellStrings.text("Use app data")) { actions.onUseAppData(detail.id) }.shellTarget("set.appdata") { actions.onUseAppData(detail.id) }
                 }
             }
+            .id("set.data")
             divider
             HStack {
                 Image(systemName: "square.stack.3d.up").foregroundStyle(.secondary)
@@ -120,6 +165,7 @@ public struct GameDetailView: View {
                         .shellTarget("set.cloud.off") { actions.onDisableCloudSaves(detail.id) }
                 }
             }
+            .id("set.cloud")
             if let backup = detail.latestSaveBackup, !backup.isEmpty {
                 divider
                 GameSettingsGlassButton(title: ShellStrings.text("Restore backup…")) {
@@ -129,18 +175,23 @@ public struct GameDetailView: View {
                 .shellTarget("set.cloud.restore") {
                     requestRestoreBackup(backup)
                 }
+                .id("set.cloud.restore")
             }
         }
-        if !detail.game.version.isEmpty {
+        if !detail.game.version.isEmpty || !(detail.playSummary ?? "").isEmpty {
             if nativeSections {
-                Section { versionRow }
+                Section {
+                    if !detail.game.version.isEmpty { versionRow }
+                    if let summary = detail.playSummary, !summary.isEmpty { playHistoryRow(summary) }
+                }
             } else {
-                versionRow
+                if !detail.game.version.isEmpty { versionRow }
+                if let summary = detail.playSummary, !summary.isEmpty { playHistoryRow(summary) }
             }
         }
         if askHomeScreen != nil || actions.supportsHomeScreen {
             if nativeSections {
-                Section { homeScreenButton }
+                Section { homeScreenButton.id("set.homeScreen") }
             } else {
                 homeScreenButton
             }
@@ -151,6 +202,7 @@ public struct GameDetailView: View {
                     coverButtons
                         .listRowBackground(Color.clear)
                         .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                        .id("set.cover")
                 }
             } else {
                 coverButtons
@@ -162,8 +214,9 @@ public struct GameDetailView: View {
                 .disabled(!detail.hasModifiedSettings)
                 .shellTarget("set.reset", enabled: detail.hasModifiedSettings) { actions.onResetDefaults(detail.id) }
             Text(ShellStrings.text("Brings back the settings this game was tested with."))
-                .shellText(12.5).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
+                .shellText(12.5).foregroundStyle(.white.opacity(0.62)).fixedSize(horizontal: false, vertical: true)
         }
+        .id("set.reset")
         if let askDelete {
             // Last and apart from the rest: the one action here that removes something. It only asks, the question names what goes.
             VStack(alignment: .leading, spacing: 10) {
@@ -171,8 +224,9 @@ public struct GameDetailView: View {
                     .accessibilityIdentifier("set.delete")
                     .shellTarget("set.delete") { askDelete(detail.game) }
                 Text(ShellStrings.text("Deletes the game’s data on this device. You choose whether its saves go too."))
-                    .shellText(12.5).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
+                    .shellText(12.5).foregroundStyle(.white.opacity(0.62)).fixedSize(horizontal: false, vertical: true)
             }
+            .id("set.delete")
         }
     }
 
@@ -181,11 +235,80 @@ public struct GameDetailView: View {
             .accessibilityIdentifier("detail.version")
     }
 
+    private func playHistoryRow(_ summary: String) -> some View {
+        LabeledContent(ShellStrings.text("Play history"), value: summary)
+            .accessibilityIdentifier("detail.playHistory")
+    }
+
+    private func requestCheats() {
+        if let openCheats {
+            openCheats(detail.game)
+        } else {
+            localSheet = .cheats
+        }
+    }
+
+    private var cheatsSummaryText: String {
+        guard let summary = detail.cheatsSummary else {
+            return ShellStrings.text("Import .txt")
+        }
+        if summary.fuseTripped {
+            return ShellStrings.text("Crash guard tripped")
+        }
+        if summary.totalCount == 0 {
+            return ShellStrings.text("Import .txt")
+        }
+        if !summary.masterOn {
+            return ShellStrings.text("Off")
+        }
+        if summary.enabledCount > 0 {
+            return ShellStrings.text("\(summary.enabledCount) active")
+        }
+        if summary.needsBakeCount > 0 {
+            return ShellStrings.text("\(summary.needsBakeCount) need builder")
+        }
+        return ShellStrings.text("\(summary.totalCount) ready")
+    }
+
+    private var cheatsEntryRow: some View {
+        Button(action: requestCheats) {
+            HStack(spacing: 12) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(ShellPalette.cream)
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ShellStrings.text("Cheats"))
+                        .shellType(ShellType.settingLabel)
+                        .foregroundStyle(.white)
+                    Text(ShellStrings.text("Import .txt files, toggle cheats, and inspect iOS support"))
+                        .shellType(ShellType.note)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Text(cheatsSummaryText)
+                    .shellText(13, .semibold, relativeTo: .footnote)
+                    .foregroundStyle(detail.cheatsSummary?.fuseTripped == true ? ShellPalette.attention : ShellPalette.cream.opacity(0.82))
+                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("set.cheats")
+        .shellTarget("set.cheats", action: requestCheats)
+    }
+
     private func requestHomeScreen() {
         if let askHomeScreen {
             askHomeScreen(detail.game)
         } else {
-            localHomeScreen = true
+            localSheet = .homeScreen
         }
     }
 
@@ -269,7 +392,95 @@ public struct GameDetailView: View {
         if let askRestoreBackup {
             askRestoreBackup(detail.game, backup)
         } else {
-            localRestoreBackup = true
+            localSheet = .restoreBackup
+        }
+    }
+
+    static func rowTargetID(_ rowID: String) -> String { "set.row." + rowID }
+
+    /// Normalizes multi-button row targets back to the canonical focus ID used in `orderedFocusRowIDs`.
+    static func focusRowID(for targetID: String) -> String {
+        switch targetID {
+        case "set.appdata": "set.data"
+        case "set.cloud.shell", "set.cloud.off": "set.cloud"
+        case "set.cover.reset": "set.cover"
+        default: targetID
+        }
+    }
+
+    /// Maps any focus target inside a game settings row to the Form cell ID `ScrollViewProxy.scrollTo` recognizes.
+    /// `ForEach(section.rows)` cells are keyed by `SettingRow.id` (`DM_*`), while static rows carry explicit `.id("set.*")`.
+    static func scrollRowID(for targetID: String) -> String {
+        let canonical = focusRowID(for: targetID)
+        if canonical.hasPrefix("set.row.") && canonical != "set.row.padMapping" {
+            return String(canonical.dropFirst("set.row.".count))
+        }
+        return canonical
+    }
+
+    /// Deterministic top-to-bottom order of enabled focus rows in `GameDetailView`, so D-pad up/down can advance
+    /// into lazy `Form` cells that have not entered the viewport yet.
+    static func orderedFocusRowIDs(
+        detail: GameDetail,
+        showsCheats: Bool = false,
+        showsHomeScreen: Bool,
+        showsChangeCover: Bool,
+        showsDelete: Bool
+    ) -> [String] {
+        var ids: [String] = []
+        if showsCheats {
+            ids.append("set.cheats")
+        }
+        for section in detail.sections {
+            if section.id == PadMappingRows.sectionID {
+                ids.append("set.row.padMapping")
+            } else {
+                for row in section.rows where row.enabled {
+                    ids.append(rowTargetID(row.id))
+                }
+            }
+        }
+        ids.append("set.data")
+        ids.append("set.cloud")
+        if let backup = detail.latestSaveBackup, !backup.isEmpty {
+            ids.append("set.cloud.restore")
+        }
+        if showsHomeScreen {
+            ids.append("set.homeScreen")
+        }
+        if showsChangeCover {
+            ids.append("set.cover")
+        }
+        if detail.hasModifiedSettings {
+            ids.append("set.reset")
+        }
+        if showsDelete {
+            ids.append("set.delete")
+        }
+        return ids
+    }
+
+    /// Fallback vertical navigation step when `FocusNavigation.next` hits the edge of currently materialized `Form` cells.
+    static func fallbackVerticalTarget(
+        from current: String?,
+        action: ShellInput.Action,
+        orderedRows: [String]
+    ) -> String? {
+        guard action == .down || action == .up else { return nil }
+        let rowID = current.map(focusRowID(for:))
+        if action == .down {
+            if current == nil || current == "set.back" || current == "set.play" {
+                return orderedRows.first
+            }
+            guard let rowID, let idx = orderedRows.firstIndex(of: rowID), idx + 1 < orderedRows.count else {
+                return nil
+            }
+            return orderedRows[idx + 1]
+        } else {
+            guard let rowID, let idx = orderedRows.firstIndex(of: rowID) else {
+                return nil
+            }
+            return idx > 0 ? orderedRows[idx - 1] : "set.back"
         }
     }
 }
@@ -292,7 +503,7 @@ struct SettingsGroup<Content: View>: View {
     }
 }
 
-private struct GameSettingsGlassButton: View {
+struct GameSettingsGlassButton: View {
     let title: String
     var destructive = false
     let action: () -> Void
@@ -368,10 +579,10 @@ struct SegmentedChoice: View {
                         // The system's echo of a controller button picks nothing (the shell's focus took the button).
                         Button { if !ignoresPress() { change(option.id) } } label: {
                             Text(option.label).shellText(13.5, chosen ? .bold : .medium).lineLimit(1)
-                                .padding(.horizontal, 14).frame(maxWidth: .infinity, minHeight: 40)
-                                .foregroundStyle(chosen ? .black : .white.opacity(0.75))
+                                .padding(.horizontal, 14).frame(maxWidth: .infinity, minHeight: 44)
+                                .foregroundStyle(chosen ? .black : .white.opacity(0.78))
                                 .background(chosen ? ShellPalette.cream : .clear, in: RoundedRectangle(cornerRadius: 8))
-                                .contentShape(RoundedRectangle(cornerRadius: 8))
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(label + ", " + option.label)
@@ -392,6 +603,23 @@ struct FromSettingsMark: View {
     var body: some View {
         Text(ShellStrings.text("From Settings")).shellType(ShellType.note).foregroundStyle(ShellPalette.cream.opacity(0.75))
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Says that a row shows an active override from this game's `env.txt`, because the UI has no explicit choice.
+struct FromEnvFileMark: View {
+    var rowID: String? = nil
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 11, weight: .semibold))
+                .accessibilityHidden(true)
+            Text(ShellStrings.text("Set in this game’s env.txt"))
+                .shellType(ShellType.note)
+                .accessibilityIdentifier(rowID.map { "setting.\($0).envOverride" } ?? "setting.envOverride")
+        }
+        .foregroundStyle(ShellPalette.cream.opacity(0.82))
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -452,6 +680,9 @@ struct NativeChoiceControl: View {
                 }
                 if !row.note.isEmpty {
                     Text(row.note).shellType(ShellType.note).foregroundStyle(.secondary)
+                }
+                if row.fromEnvFile {
+                    FromEnvFileMark(rowID: row.id)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

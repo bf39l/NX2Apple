@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import ShellUI
 
@@ -15,10 +16,30 @@ public enum ProvisioningProfile {
         return expiration(at: url, fileManager: fm)
     }
 
-    /// Reads `TeamIdentifier` (10-character Apple developer team ID) from `Bundle.main`'s `embedded.mobileprovision`, or nil when absent.
-    public static func bundledTeamIdentifier(bundle: Bundle = .main, fileManager fm: FileManager = .default) -> String? {
-        guard let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision") else { return nil }
-        return teamIdentifier(at: url, fileManager: fm)
+    /// True when the app is executing as a guest inside LiveContainer (`LC_HOME_PATH` or `LP_HOME_PATH` set by `LCBootstrap`).
+    public static func isRunningInLiveContainer(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        for key in ["LC_HOME_PATH", "LP_HOME_PATH"] {
+            if let value = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Reads `TeamIdentifier` (10-character Apple developer team ID) from `Bundle.main`, preferring the live executable's
+    /// Mach-O signature when running inside LiveContainer (where a guest bundle may lack or retain a stale `embedded.mobileprovision`).
+    public static func bundledTeamIdentifier(bundle: Bundle = .main,
+                                             environment: [String: String] = ProcessInfo.processInfo.environment,
+                                             fileManager fm: FileManager = .default) -> String? {
+        let exeTeam = bundle.executableURL
+            .flatMap { FrameworkSignature.inspect(executable: $0, fileManager: fm)?.teamID }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let profileTeam = bundle.url(forResource: "embedded", withExtension: "mobileprovision")
+            .flatMap { teamIdentifier(at: $0, fileManager: fm) }
+        if isRunningInLiveContainer(environment: environment), let exeTeam {
+            return exeTeam
+        }
+        return profileTeam ?? exeTeam
     }
 
     /// Reads `TeamIdentifier` from a `.mobileprovision` file at `url`, returning nil safely on missing, oversize or damaged files.
@@ -52,6 +73,46 @@ public enum ProvisioningProfile {
     /// Extracts `ExpirationDate` from raw CMS-signed `.mobileprovision` bytes or a plain XML/binary property list.
     public static func expiration(fromProfile data: Data) -> Date? {
         plist(fromProfile: data)?["ExpirationDate"] as? Date
+    }
+
+    /// Extracts the SHA-1 fingerprint (40 uppercase hex chars) of the leaf certificate in `Bundle.main.executableURL`'s code signature.
+    public static func bundledSigningCertificateSHA1(bundle: Bundle = .main, fileManager fm: FileManager = .default) -> String? {
+        guard let exeURL = bundle.executableURL else { return nil }
+        return FrameworkSignature.signingCertificateSHA1(executable: exeURL, fileManager: fm)
+    }
+
+    /// True when the app's provisioning profile carries development execution privileges (`get-task-allow = true`
+    /// and not an enterprise `ProvisionsAllDevices` profile), or when executing inside LiveContainer (which re-signs
+    /// the guest executable with a development identity without writing `embedded.mobileprovision`).
+    public static func bundledAllowsHotFrameworkLoading(bundle: Bundle = .main,
+                                                        environment: [String: String] = ProcessInfo.processInfo.environment,
+                                                        fileManager fm: FileManager = .default) -> Bool {
+        let inLiveContainer = isRunningInLiveContainer(environment: environment)
+        guard let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = profileData(at: url, fileManager: fm) else {
+            return inLiveContainer
+        }
+        if inLiveContainer {
+            let exeTeam = bundle.executableURL
+                .flatMap { FrameworkSignature.inspect(executable: $0, fileManager: fm)?.teamID }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let profTeam = teamIdentifier(fromProfile: data)
+            if let exeTeam, let profTeam, exeTeam != profTeam {
+                // Guest bundle carries a stale build-time profile from another team while LiveContainer re-signed the binary.
+                return true
+            }
+        }
+        return allowsHotFrameworkLoading(fromProfile: data)
+    }
+
+    /// Evaluates raw `.mobileprovision` bytes for `Documents/Frameworks/` execution eligibility (`get-task-allow`).
+    public static func allowsHotFrameworkLoading(fromProfile data: Data) -> Bool {
+        guard let dict = plist(fromProfile: data) else { return false }
+        if (dict["ProvisionsAllDevices"] as? Bool) == true {
+            return false
+        }
+        guard let entitlements = dict["Entitlements"] as? [String: Any] else { return false }
+        return (entitlements["get-task-allow"] as? Bool) == true
     }
 
     private static func profileData(at url: URL, fileManager fm: FileManager) -> Data? {
@@ -102,7 +163,7 @@ public enum ProvisioningProfile {
 public struct ShellHostBeacon: Codable, Equatable, Sendable {
     public static let fileName = ".shell-host.json"
     public static let currentSchema = 1
-    public static let currentGlueVersion = 2
+    public static let currentGlueVersion = 3
 
     public var schema: Int
     public var glueVersion: Int
@@ -111,9 +172,12 @@ public struct ShellHostBeacon: Codable, Equatable, Sendable {
     public var chain: String
     public var version: String
     public var expiresAtEpoch: Int64?
+    public var allowsHotPush: Bool?
+    public var certSHA1: String?
 
     public init(schema: Int = Self.currentSchema, glueVersion: Int = Self.currentGlueVersion, bundleID: String, teamID: String,
-                chain: String, version: String, expiresAtEpoch: Int64? = nil) {
+                chain: String, version: String, expiresAtEpoch: Int64? = nil, allowsHotPush: Bool? = nil,
+                certSHA1: String? = nil) {
         self.schema = schema
         self.glueVersion = glueVersion
         self.bundleID = bundleID
@@ -121,18 +185,25 @@ public struct ShellHostBeacon: Codable, Equatable, Sendable {
         self.chain = chain
         self.version = version
         self.expiresAtEpoch = expiresAtEpoch
+        self.allowsHotPush = allowsHotPush
+        self.certSHA1 = certSHA1
     }
 
-    public static func write(to documents: URL, bundle: Bundle = .main, glueVersion: Int = Self.currentGlueVersion, fileManager fm: FileManager = .default) {
+    public static func write(to documents: URL, bundle: Bundle = .main, glueVersion: Int = Self.currentGlueVersion,
+                             environment: [String: String] = ProcessInfo.processInfo.environment,
+                             fileManager fm: FileManager = .default) {
         let info = bundle.infoDictionary ?? [:]
         let bundleID = (info["CFBundleIdentifier"] as? String) ?? bundle.bundleIdentifier ?? ""
         let rawChain = (info["DMChain"] as? String) ?? ""
         let chain = rawChain.isEmpty || rawChain.hasPrefix("b-") ? rawChain : "b-" + rawChain
         let version = (info["CFBundleShortVersionString"] as? String) ?? ""
-        let teamID = ProvisioningProfile.bundledTeamIdentifier(bundle: bundle, fileManager: fm) ?? ""
+        let teamID = ProvisioningProfile.bundledTeamIdentifier(bundle: bundle, environment: environment, fileManager: fm) ?? ""
         let expires = ProvisioningProfile.bundledExpiration(bundle: bundle, fileManager: fm).map { Int64($0.timeIntervalSince1970.rounded()) }
+        let allowsHot = ProvisioningProfile.bundledAllowsHotFrameworkLoading(bundle: bundle, environment: environment, fileManager: fm)
+        let certSHA1 = ProvisioningProfile.bundledSigningCertificateSHA1(bundle: bundle, fileManager: fm)
         let beacon = ShellHostBeacon(glueVersion: glueVersion, bundleID: bundleID, teamID: teamID,
-                                     chain: chain, version: version, expiresAtEpoch: expires)
+                                     chain: chain, version: version, expiresAtEpoch: expires,
+                                     allowsHotPush: allowsHot, certSHA1: certSHA1)
         guard let data = try? JSONEncoder().encode(beacon) else { return }
         try? fm.createDirectory(at: documents, withIntermediateDirectories: true)
         try? data.write(to: documents.appendingPathComponent(fileName), options: .atomic)
@@ -147,9 +218,20 @@ public enum FrameworkSignature {
     public struct Info: Equatable, Sendable {
         public var hasCodeSignature: Bool
         public var teamID: String?
+        public var certSHA1: String?
         public var sliceOffset: UInt64
         public var signatureOffset: UInt32
         public var signatureSize: UInt32
+
+        public init(hasCodeSignature: Bool, teamID: String?, certSHA1: String? = nil,
+                    sliceOffset: UInt64, signatureOffset: UInt32, signatureSize: UInt32) {
+            self.hasCodeSignature = hasCodeSignature
+            self.teamID = teamID
+            self.certSHA1 = certSHA1
+            self.sliceOffset = sliceOffset
+            self.signatureOffset = signatureOffset
+            self.signatureSize = signatureSize
+        }
     }
 
     private static let mhMagic64: UInt32 = 0xfeed_facf
@@ -158,8 +240,15 @@ public enum FrameworkSignature {
     private static let lcCodeSignature: UInt32 = 0x0000_001d
     private static let csMagicEmbeddedSignature: UInt32 = 0xfade_0cc0
     private static let csMagicCodeDirectory: UInt32 = 0xfade_0c02
+    private static let csMagicBlobWrapper: UInt32 = 0xfade_0b01
+    private static let csSlotCMSSignature: UInt32 = 0x0001_0000
     private static let csSupportsTeamID: UInt32 = 0x0002_0200
     private static let cpuTypeArm64: UInt32 = 0x0100_000c
+
+    /// Reads the leaf signing certificate SHA-1 fingerprint (40 uppercase hex chars) from a Mach-O executable's CMS blob.
+    public static func signingCertificateSHA1(executable url: URL, fileManager fm: FileManager = .default) -> String? {
+        inspect(executable: url, fileManager: fm)?.certSHA1
+    }
 
     public static func inspect(executable url: URL, fileManager fm: FileManager = .default) -> Info? {
         guard let attrs = try? fm.attributesOfItem(atPath: url.path),
@@ -259,42 +348,105 @@ public enum FrameworkSignature {
 
         var foundCD = false
         var teamID: String?
+        var certSHA1: String?
         for i in 0..<count {
+            let slotType = u32BE(blob, 12 + i * 8)
             let entryOff = Int(u32BE(blob, 12 + i * 8 + 4))
             guard entryOff >= 12, entryOff <= sbLen - 8 else { continue }
             let magic = u32BE(blob, entryOff)
             let len = Int(u32BE(blob, entryOff + 4))
-            guard magic == csMagicCodeDirectory, len >= 44, len <= sbLen - entryOff else { continue }
-            foundCD = true
-            let version = u32BE(blob, entryOff + 8)
-            if version >= csSupportsTeamID, len >= 52 {
-                let teamOff = Int(u32BE(blob, entryOff + 48))
-                if teamOff >= 52, teamOff < len {
-                    let start = blob.startIndex + entryOff + teamOff
-                    let limit = blob.startIndex + entryOff + len
-                    if let nul = blob[start..<limit].firstIndex(of: 0), nul > start,
-                       let text = String(data: blob[start..<nul], encoding: .utf8), !text.isEmpty {
-                        teamID = text
+            guard len >= 8, len <= sbLen - entryOff else { continue }
+            if magic == csMagicCodeDirectory, len >= 44 {
+                foundCD = true
+                let version = u32BE(blob, entryOff + 8)
+                if version >= csSupportsTeamID, len >= 52 {
+                    let teamOff = Int(u32BE(blob, entryOff + 48))
+                    if teamOff >= 52, teamOff < len {
+                        let start = blob.startIndex + entryOff + teamOff
+                        let limit = blob.startIndex + entryOff + len
+                        if let nul = blob[start..<limit].firstIndex(of: 0), nul > start,
+                           let text = String(data: blob[start..<nul], encoding: .utf8), !text.isEmpty {
+                            teamID = text
+                        }
                     }
                 }
+            } else if slotType == csSlotCMSSignature, magic == csMagicBlobWrapper, len > 8 {
+                let cmsRange = (blob.startIndex + entryOff + 8)..<(blob.startIndex + entryOff + len)
+                certSHA1 = leafCertificateSHA1(fromCMS: Data(blob[cmsRange]))
             }
-            break
         }
         guard foundCD else {
             return Info(hasCodeSignature: false, teamID: nil, sliceOffset: sliceOffset, signatureOffset: 0, signatureSize: 0)
         }
-        return Info(hasCodeSignature: true, teamID: teamID, sliceOffset: sliceOffset,
+        return Info(hasCodeSignature: true, teamID: teamID, certSHA1: certSHA1, sliceOffset: sliceOffset,
                     signatureOffset: sigDataOff, signatureSize: sigDataSize)
     }
 
+    private static func leafCertificateSHA1(fromCMS cmsData: Data) -> String? {
+        guard !cmsData.isEmpty,
+              let root = ASN1DER.readElement(in: cmsData, at: cmsData.startIndex),
+              root.tag == 0x30,
+              let contentInfoChildren = ASN1DER.children(of: root, in: cmsData),
+              contentInfoChildren.count >= 2,
+              contentInfoChildren[1].tag == 0xA0,
+              let explicitChildren = ASN1DER.children(of: contentInfoChildren[1], in: cmsData),
+              let signedDataEl = explicitChildren.first,
+              signedDataEl.tag == 0x30,
+              let sdChildren = ASN1DER.children(of: signedDataEl, in: cmsData) else {
+            return nil
+        }
+
+        var certsDER: [Data] = []
+        var signerIssuerRaw: Data?
+        var signerSerialRaw: Data?
+
+        for el in sdChildren {
+            if el.tag == 0xA0, let items = ASN1DER.children(of: el, in: cmsData) {
+                for cert in items where cert.tag == 0x30 {
+                    certsDER.append(cert.fullData(in: cmsData))
+                }
+            } else if el.tag == 0x31, let infos = ASN1DER.children(of: el, in: cmsData),
+                      let firstInfo = infos.first(where: { $0.tag == 0x30 }),
+                      let infoFields = ASN1DER.children(of: firstInfo, in: cmsData),
+                      infoFields.count >= 2,
+                      infoFields[1].tag == 0x30,
+                      let sidFields = ASN1DER.children(of: infoFields[1], in: cmsData),
+                      sidFields.count >= 2,
+                      sidFields[0].tag == 0x30,
+                      sidFields[1].tag == 0x02 {
+                signerIssuerRaw = sidFields[0].fullData(in: cmsData)
+                signerSerialRaw = sidFields[1].fullData(in: cmsData)
+            }
+        }
+
+        guard !certsDER.isEmpty else { return nil }
+        var leafDER: Data?
+        if let signerIssuerRaw, let signerSerialRaw {
+            leafDER = certsDER.first { der in
+                guard let parsed = X509CertificateParser.parse(der: der) else { return false }
+                return parsed.issuerRawTLV == signerIssuerRaw && parsed.serialNumberRawTLV == signerSerialRaw
+            }
+        }
+        let chosen = leafDER ?? certsDER[0]
+        return Insecure.SHA1.hash(data: chosen).map { String(format: "%02X", $0) }.joined()
+    }
+
+    public static let unsupportedHotFrameworkSigningMessage = "This app signature does not support loading games from Documents/Frameworks. Reinstall the app from NX2Apple on your computer."
+    public static let certMismatchHotFrameworkMessage = "Could not load the game framework because the signing certificate does not match this app. Reinstall the app from your computer."
+
     /// Returns nil when `executable` is safe to pass to `dlopen`, or a readable refusal string when an external framework
-    /// is missing, unsigned, or signed with a different Apple developer team than `hostTeamID`.
+    /// is missing, blocked by the host signing profile, unsigned, or signed with a different team/certificate than the host app.
     public static func preflightExternal(executable: URL, appBundleURL: URL, hostTeamID: String?,
+                                         hostCertSHA1: String? = nil,
+                                         allowsHotLoading: Bool = true,
                                          fileManager fm: FileManager = .default) -> String? {
         let bundlePrefix = appBundleURL.resolvingSymlinksInPath().standardizedFileURL.path + "/"
         let exePath = executable.resolvingSymlinksInPath().standardizedFileURL.path
         if exePath.hasPrefix(bundlePrefix) {
             return nil
+        }
+        guard allowsHotLoading else {
+            return hostText("This app signature does not support loading games from Documents/Frameworks. Reinstall the app from NX2Apple on your computer.")
         }
         guard let info = inspect(executable: executable, fileManager: fm) else {
             return hostText("The game's framework executable could not be read. Install the game again from NX2Apple.")
@@ -307,6 +459,11 @@ public enum FrameworkSignature {
                 let actual = info.teamID ?? "ad-hoc"
                 return hostText("This game's framework is signed for \(actual), while this app is signed for team \(requiredTeam). Reinstall it with the same signing team from NX2Apple, or import your sideload .p12 certificate in Settings to sign it automatically on this device.")
             }
+        }
+        if let expectedSHA1 = hostCertSHA1, !expectedSHA1.isEmpty,
+           let actualSHA1 = info.certSHA1, !actualSHA1.isEmpty,
+           expectedSHA1.caseInsensitiveCompare(actualSHA1) != .orderedSame {
+            return hostText("Could not load the game framework because the signing certificate does not match this app. Reinstall the app from your computer.")
         }
         return nil
     }

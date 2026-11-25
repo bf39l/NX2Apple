@@ -46,6 +46,8 @@ public struct ShellHostConfig: Sendable {
     public var sideloadCertBacking: any SideloadCertBacking
     /// Host app bundle identifier stamped into locally re-signed external framework CodeDirectories.
     public var hostBundleID: @Sendable () -> String
+    /// Whether the running app's signing profile allows mapping external frameworks from `Documents/Frameworks/`.
+    public var supportsHotFrameworkLoading: @Sendable () -> Bool
     /// Split-part byte size used by startup `DataParts.joinAll` (defaults to 512 MiB).
     public var joinPartSize: Int64
     var onJoinProgress: (@Sendable (DataParts.Progress) -> Void)?
@@ -72,6 +74,7 @@ public struct ShellHostConfig: Sendable {
                 provisioningExpiration: @escaping @Sendable () -> Date? = { ProvisioningProfile.bundledExpiration() },
                 sideloadCertBacking: any SideloadCertBacking = KeychainCertBacking(),
                 hostBundleID: @escaping @Sendable () -> String = { Bundle.main.bundleIdentifier ?? "" },
+                supportsHotFrameworkLoading: @escaping @Sendable () -> Bool = { true },
                 joinPartSize: Int64 = DataParts.partSize) {
         self.gamesRoot = gamesRoot
         self.hotFrameworksRoot = hotFrameworksRoot
@@ -102,6 +105,7 @@ public struct ShellHostConfig: Sendable {
         self.provisioningExpiration = provisioningExpiration
         self.sideloadCertBacking = sideloadCertBacking
         self.hostBundleID = hostBundleID
+        self.supportsHotFrameworkLoading = supportsHotFrameworkLoading
         self.joinPartSize = joinPartSize
         self.onJoinProgress = nil
     }
@@ -151,6 +155,7 @@ public struct ShellHostConfig: Sendable {
     public static let didReturnToLibraryNotification = Notification.Name("DMShellDidReturnToLibrary")
     public private(set) var details: [GameDetail] = []
     public private(set) var entries: [CatalogueEntry] = []
+    public internal(set) var activityLog: ActivityLogSnapshot = .empty
     public private(set) var controllers: [ControllerInfo] = []
     public private(set) var input = ShellInputLog()
     /// A short message the host view shows as an alert.
@@ -183,12 +188,18 @@ public struct ShellHostConfig: Sendable {
         var report: CloudSaveSyncCheck.Report
     }
 
-    @ObservationIgnored private let config: ShellHostConfig
+    @ObservationIgnored let config: ShellHostConfig
     @ObservationIgnored private let launcher: any GameLauncher
     @ObservationIgnored private let picker: any FolderPicker
     @ObservationIgnored private let certificatePicker: any SideloadCertificatePicker
+    @ObservationIgnored let cheatPicker: any CheatFilePicker
     @ObservationIgnored private let sideloadCertificateStore: SideloadCertificateStore
     @ObservationIgnored private var pendingPKCS12Data: Data?
+    @ObservationIgnored var pendingCheatImport: (gameID: String, token: String, targetBuildID: String, data: Data)?
+    @ObservationIgnored var cheatsOpGeneration: [String: UInt64] = [:]
+    @ObservationIgnored var cheatsSummaries: [String: GameCheatsSummary] = [:]
+    @ObservationIgnored var cheatsScanTask: Task<Void, Never>?
+    @ObservationIgnored var cheatsScanGeneration: UInt64 = 0
     @ObservationIgnored private var certificateGeneration: UInt64 = 0
     @ObservationIgnored private var certificateLoadTask: Task<Void, Never>?
     @ObservationIgnored private let adapter = GamepadAdapter()
@@ -199,6 +210,8 @@ public struct ShellHostConfig: Sendable {
     @ObservationIgnored private var resolvedProfiles: [String: LauncherProfile] = [:]
     /// The shell-level settings every game falls back to (game > shell > built-in).
     @ObservationIgnored public let shellSettings: ShellSettingsStore
+    /// Persistent per-title play history stored outside per-game data directories (#1161).
+    @ObservationIgnored public let playHistory: PlayHistoryStore
     @ObservationIgnored private let shellData: BookmarkStore
     @ObservationIgnored private let shellCloud: BookmarkStore
     @ObservationIgnored private var shellChoices: [String]
@@ -215,6 +228,7 @@ public struct ShellHostConfig: Sendable {
     @ObservationIgnored private var joiningProgress: [String: DataParts.Progress] = [:]
     @ObservationIgnored nonisolated(unsafe) private var directoryWatcher: GameDirectoryWatcher?
     @ObservationIgnored private var pickGeneration: [String: UInt64] = [:]
+    @ObservationIgnored private var shellDataPickGeneration: UInt64 = 0
     @ObservationIgnored private var pickedDataNotes: [String: String] = [:]
     @ObservationIgnored private var cloudCheckGeneration: UInt64 = 0
     @ObservationIgnored private var pendingCloudLaunch: PendingCloudLaunch?
@@ -239,13 +253,17 @@ public struct ShellHostConfig: Sendable {
 
     public init(config: ShellHostConfig, launcher: any GameLauncher = StubGameLauncher(), picker: any FolderPicker = NoFolderPicker(),
                 certificatePicker: any SideloadCertificatePicker = NoSideloadCertificatePicker(),
-                shellSettings: ShellSettingsStore = .current) {
+                cheatPicker: any CheatFilePicker = NoCheatFilePicker(),
+                shellSettings: ShellSettingsStore = .current, playHistory: PlayHistoryStore? = nil) {
         self.config = config
         self.launcher = launcher
         self.picker = picker
         self.certificatePicker = certificatePicker
+        self.cheatPicker = cheatPicker
         self.sideloadCertificateStore = SideloadCertificateStore(backing: config.sideloadCertBacking, now: config.now)
         self.shellSettings = shellSettings
+        self.playHistory = playHistory ?? PlayHistoryStore(fileURL: PlayHistoryStore.defaultFileURL(appDataRoot: config.appDataRoot))
+        self.playHistory.recoverStaleSessionIfNeeded()
         shellData = BookmarkStore(defaults: shellSettings.defaults, key: ShellSettingsStore.dataFolderKey)
         shellCloud = BookmarkStore(defaults: shellSettings.defaults, key: ShellSettingsStore.cloudSavesKey)
         shellChoices = Self.choices(of: shellSettings)
@@ -320,6 +338,7 @@ public struct ShellHostConfig: Sendable {
         shellChoices = Self.choices(of: shellSettings)
         startShellScan()
         details = entries.map(detail(for:))
+        rebuildActivityLog()
     }
 
     public func setPadMerge(_ on: Bool) {
@@ -374,6 +393,7 @@ public struct ShellHostConfig: Sendable {
         await signingCheckTask?.value
         await certificateLoadTask?.value
         await backupScanTask?.value
+        await cheatsScanTask?.value
         await bannerFetchTask?.value
         for task in romfsChecks.values.compactMap(\.task) {
             await task.value
@@ -561,7 +581,10 @@ public struct ShellHostConfig: Sendable {
             guard let self, !Task.isCancelled, self.scannedShellFolder == folder.path else { return }
             self.shellScan = nil
             self.shellMatches = found
-            if !found.isEmpty { self.details = self.entries.map(self.detail(for:)) }
+            if !found.isEmpty {
+                self.details = self.entries.map(self.detail(for:))
+                self.rebuildActivityLog()
+            }
         }
     }
 
@@ -575,6 +598,7 @@ public struct ShellHostConfig: Sendable {
         await signingCheckTask?.value
         await certificateLoadTask?.value
         await backupScanTask?.value
+        await cheatsScanTask?.value
         await bannerFetchTask?.value
         for entry in entries { _ = await verifiedData(for: entry) }
     }
@@ -583,10 +607,40 @@ public struct ShellHostConfig: Sendable {
         if Self.choices(of: shellSettings) != shellChoices { refreshAll() }
     }
 
+    private func gameEnvURL(for id: String) -> URL {
+        appFolder(for: id).appendingPathComponent("env.txt")
+    }
+
+    private func gameEnvOverrides(for id: String) -> [String: String] {
+        GameEnvFileSync.readOverrides(at: gameEnvURL(for: id))
+    }
+
+    private func makeSettingsStore(for id: String, profile: LauncherProfile) -> GameSettingsStore {
+        GameSettingsStore(
+            profile: profile,
+            defaults: config.defaults(id),
+            shell: shellSettings.gameDefaults,
+            envFile: gameEnvOverrides(for: id)
+        )
+    }
+
+    private func reconcileInGameChangesWithEnvFile(for id: String, profile: LauncherProfile) {
+        let envURL = gameEnvURL(for: id)
+        let overrides = GameEnvFileSync.readOverrides(at: envURL)
+        guard !overrides.isEmpty else { return }
+        let store = GameSettingsStore(profile: profile, defaults: config.defaults(id), shell: shellSettings.gameDefaults, envFile: overrides)
+        for setting in profile.settings where overrides[setting.env] != nil && store.hasExplicitChoice(setting) {
+            let explicit = store.value(of: setting)
+            _ = store.set(setting.env, to: explicit)
+            GameEnvFileSync.syncKey(setting.env, value: store.savedValue(for: setting.env), in: envURL)
+        }
+    }
+
     private func refreshSettingsAfterGameReturn() {
         shellChoices = Self.choices(of: shellSettings)
         for entry in entries {
             if let profile = cachedOrResolvedProfile(for: entry.id) {
+                reconcileInGameChangesWithEnvFile(for: entry.id, profile: profile)
                 refreshSettings(entry.id, profile: profile)
             } else {
                 refresh(entry.id)
@@ -611,12 +665,14 @@ public struct ShellHostConfig: Sendable {
         let scanned = GameCatalogue.scan(root: config.gamesRoot, hotRoot: config.hotFrameworksRoot, gameDataRoot: config.appDataRoot).filter { !isDeleted($0) }
         let built = scanned.map(detail(for:))
         let order = LibraryOrder.ids(of: built.map(\.game), lastPlayed: Dictionary(uniqueKeysWithValues: scanned.compactMap { e in
-            lastPlayed(e.id).map { (e.id, $0) } }))
+            effectiveLastPlayed(e.id).map { (e.id, $0) } }))
         let position = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
         entries = scanned.sorted { position[$0.id] ?? 0 < position[$1.id] ?? 0 }
         details = built.sorted { position[$0.id] ?? 0 < position[$1.id] ?? 0 }
+        rebuildActivityLog()
         startShellScan(force: true)
         startBackupScan()
+        startCheatsSummaryScan()
         startMissingBannerFetch()
         directoryWatcher?.refreshTargets()
         if !afterClaim && !isBusyWithGame {
@@ -626,16 +682,29 @@ public struct ShellHostConfig: Sendable {
 
     private func lastPlayed(_ id: String) -> Date? { LastPlayedStore(defaults: config.defaults(id)).date }
 
+    func refreshHostGame(_ id: String) {
+        refresh(id)
+    }
+
     private func refresh(_ id: String) {
-        guard let e = entries.firstIndex(where: { $0.id == id }), let d = details.firstIndex(where: { $0.id == id }) else { return }
-        details[d] = detail(for: entries[e])
+        if let e = entries.firstIndex(where: { $0.id == id }), let d = details.firstIndex(where: { $0.id == id }) {
+            details[d] = detail(for: entries[e])
+        }
+        rebuildActivityLog()
+    }
+
+    func updateCheatsSummary(_ summary: GameCheatsSummary, for id: String) {
+        cheatsSummaries[id] = summary
+        guard let d = details.firstIndex(where: { $0.id == id }) else { return }
+        details[d].cheatsSummary = summary
     }
 
     private func settingsSnapshot(for id: String, profile: LauncherProfile) -> (sections: [SettingSection], hasModifiedSettings: Bool) {
-        let store = GameSettingsStore(profile: profile, defaults: config.defaults(id), shell: shellSettings.gameDefaults)
+        let store = makeSettingsStore(for: id, profile: profile)
         let fromShell = Set(profile.settings.filter(store.isFromShell).map(\.env))
+        let fromEnvFile = Set(profile.settings.filter(store.isFromEnvFile).map(\.env))
         let pad = GamePadMapStore(defaults: config.defaults(id))
-        let sections = SettingsPresenter.sections(profile: profile, values: store.values(), fromShell: fromShell)
+        let sections = SettingsPresenter.sections(profile: profile, values: store.values(), fromShell: fromShell, fromEnvFile: fromEnvFile)
         // A profile-provided DM_PAD_MAP row owns the mapping, so do not offer conflicting shell overrides.
         let padSections = profile.settings.contains { $0.env == "DM_PAD_MAP" } ? [] : [pad.section()]
         return (sections + padSections, store.hasModifiedSettings || !pad.entries.isEmpty)
@@ -798,17 +867,33 @@ public struct ShellHostConfig: Sendable {
             let totalSize = Self.formatByteSize(progress.totalBytes)
             state = .joiningGameData(percent: percent, doneSize: doneSize, totalSize: totalSize)
         }
-        let played = lastPlayed(entry.id)
+        let locale = activeHostLocale
+        let historyRecord = playHistory[entry.id]
+        let played = effectiveLastPlayed(entry.id)
+        let playTime = (historyRecord?.seconds ?? 0) >= 60
+            ? ShellFormat.duration(historyRecord?.seconds ?? 0, locale: locale)
+            : nil
+        let playedLabel = played.map { ShellFormat.played($0, now: config.now(), locale: locale) }
+        let recentlyPlayedLabel: String? = {
+            let joined = ShellFormat.metaLine(playTime, playedLabel)
+            return joined.isEmpty ? nil : joined
+        }()
+        let playSummary: String? = {
+            guard let historyRecord, historyRecord.sessions > 0 else { return nil }
+            let durationText = playTime ?? ShellFormat.underOneMinute()
+            return ShellFormat.playSummary(duration: durationText, sessions: historyRecord.sessions)
+        }()
         let bannerResolution = GameBannerStore.resolve(for: entry, bannersRoot: config.bannersRoot)
         let resolvedBanner = bannerResolution.candidates.lazy.compactMap { self.image($0) }.first
         let tile = GameTile(id: entry.id, title: entry.title, subtitle: entry.manifest.map { ShellFormat.version($0.displayVersion) } ?? "",
                             banner: resolvedBanner, icon: image(entry.iconURL), state: state,
-                            recentlyPlayed: played.map { ShellFormat.played($0, now: config.now()) }, version: entry.manifest?.displayVersion ?? "",
+                            recentlyPlayed: recentlyPlayedLabel, version: entry.manifest?.displayVersion ?? "",
                             isSwitch2: entry.manifest?.console == "switch2",
                             hasCustomCover: bannerResolution.hasCustomCover)
         guard let profile = profile(for: entry, data: data) else {
             resolvedProfiles.removeValue(forKey: entry.id)
-            return GameDetail(game: tile, dataNote: dataNote(for: entry.id, data: data, found: false, readiness: readiness))
+            return GameDetail(game: tile, dataNote: dataNote(for: entry.id, data: data, found: false, readiness: readiness),
+                              playSummary: playSummary)
         }
         resolvedProfiles[entry.id] = profile
         var cloud: String?
@@ -827,13 +912,14 @@ public struct ShellHostConfig: Sendable {
         var shellFolder = false
         if case .url = shellCloud.resolve() { shellFolder = true }
         let snapshot = settingsSnapshot(for: entry.id, profile: profile)
+        let cheatsSummary = cheatsSummaries[entry.id]
         return GameDetail(
             game: tile, sections: snapshot.sections,
             dataSource: dataSource(data), dataNote: dataNote(for: entry.id, data: data, found: data.found, readiness: readiness),
             cloudSaves: cloud, cloudNote: cloudNote, dlc: dlc(data), hasModifiedSettings: snapshot.hasModifiedSettings,
             dataFromShell: data.source == .shell, cloudFromShell: cloudFromShell,
             cloudCanUseShell: shellFolder && !cloudFromShell,
-            latestSaveBackup: latestBackup)
+            latestSaveBackup: latestBackup, playSummary: playSummary, cheatsSummary: cheatsSummary)
     }
 
     private func dataSource(_ data: DataResolution) -> String {
@@ -973,6 +1059,48 @@ public struct ShellHostConfig: Sendable {
             },
             onRemoveSideloadCertificate: { [weak self] in
                 self?.removeSideloadCertificate()
+            },
+            onLoadCheats: { [weak self] id in
+                self?.loadCheatsSnapshot(for: id) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")
+            },
+            onLoadCheatsAsync: { [weak self] id in
+                guard let self else { return GameCheatsSnapshot(gameID: id, gameTitle: "") }
+                return await self.loadCheatsSnapshotAsync(for: id)
+            },
+            onToggleCheatMaster: { [weak self] id, on in
+                self?.setCheatMaster(for: id, on: on) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")
+            },
+            onToggleCheatMasterAsync: { [weak self] id, on in
+                guard let self else { return GameCheatsSnapshot(gameID: id, gameTitle: "") }
+                return await self.setCheatMasterAsync(for: id, on: on)
+            },
+            onToggleCheatEntry: { [weak self] id, key, on in
+                self?.setCheatEntry(for: id, key: key, on: on) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")
+            },
+            onToggleCheatEntryAsync: { [weak self] id, key, on in
+                guard let self else { return GameCheatsSnapshot(gameID: id, gameTitle: "") }
+                return await self.setCheatEntryAsync(for: id, key: key, on: on)
+            },
+            onImportCheatFile: { [weak self] id in
+                guard let self else { return .cancelled }
+                return await self.importCheatFileNow(for: id)
+            },
+            onConfirmMismatchCheatImport: { [weak self] id, token in
+                self?.confirmMismatchCheatImport(for: id, token: token) ?? .cancelled
+            },
+            onConfirmMismatchCheatImportAsync: { [weak self] id, token in
+                guard let self else { return .cancelled }
+                return await self.confirmMismatchCheatImportAsync(for: id, token: token)
+            },
+            onCancelMismatchCheatImport: { [weak self] id in
+                self?.cancelMismatchCheatImport(for: id)
+            },
+            onDismissCheatFuseAlert: { [weak self] id in
+                self?.dismissCheatFuseAlert(for: id) ?? GameCheatsSnapshot(gameID: id, gameTitle: "")
+            },
+            onDismissCheatFuseAlertAsync: { [weak self] id in
+                guard let self else { return GameCheatsSnapshot(gameID: id, gameTitle: "") }
+                return await self.dismissCheatFuseAlertAsync(for: id)
             })
     }
 
@@ -1015,6 +1143,8 @@ public struct ShellHostConfig: Sendable {
             sideloadCertificate = summary
             return nil
         case .failure(let error):
+            // Keep the staged .p12 bytes while the password sheet stays open for retry; cancelSideloadCertificateImport clears them.
+            pendingPKCS12Data = data
             return error.localizedDescription
         }
     }
@@ -1126,7 +1256,10 @@ public struct ShellHostConfig: Sendable {
         if setting.hasPrefix("pad.") {
             GamePadMapStore(defaults: config.defaults(id)).change(setting, value: value)
         } else {
-            GameSettingsStore(profile: profile, defaults: config.defaults(id), shell: shellSettings.gameDefaults).set(setting, to: value)
+            let store = makeSettingsStore(for: id, profile: profile)
+            if store.set(setting, to: value) {
+                GameEnvFileSync.syncKey(setting, value: store.savedValue(for: setting), in: gameEnvURL(for: id))
+            }
         }
         refreshSettings(id, profile: profile)
     }
@@ -1134,6 +1267,7 @@ public struct ShellHostConfig: Sendable {
     public func resetDefaults(_ id: String) {
         guard let profile = cachedOrResolvedProfile(for: id) else { return }
         GameSettingsStore(profile: profile, defaults: config.defaults(id)).reset()
+        GameEnvFileSync.clearKeys(Set(profile.settings.map(\.env)), in: gameEnvURL(for: id))
         GamePadMapStore(defaults: config.defaults(id)).reset()
         refreshSettings(id, profile: profile)
     }
@@ -1157,18 +1291,20 @@ public struct ShellHostConfig: Sendable {
         guard let url = await pickedFolder() else { return }
         let generation = (pickGeneration[id] ?? 0) &+ 1
         pickGeneration[id] = generation
-        pickedDataNotes.removeValue(forKey: id)
-        guard dataStore(id).store(url) else {
-            notice = hostText("That location could not be remembered. Try a different one.")
-            return
-        }
-        forgetCheckedRomfsImages()
         guard let currentEntry = entry(id) else { return }
-        let resolved = await verifiedData(for: currentEntry)
-        guard pickGeneration[id] == generation else { return }
-        refresh(id)
-        if resolved.source != .picked {
-            if let manifest = currentEntry.manifest, currentEntry.problem == nil {
+
+        if let manifest = currentEntry.manifest, currentEntry.problem == nil {
+            let folderMatchesGame = await Task.detached(priority: .userInitiated) {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                guard FileManager.default.fileExists(atPath: url.path) else { return false }
+                let appFallback = FileManager.default.temporaryDirectory.appendingPathComponent("nx-unused-\(UUID().uuidString)", isDirectory: true)
+                let check = DataLocator.locate(manifest: manifest, picked: .url(url), appFolder: appFallback)
+                return check.source == .picked
+            }.value
+            guard pickGeneration[id] == generation, let latestEntry = entry(id) else { return }
+            if !folderMatchesGame {
+                // Keep any previously working folder bookmark intact when the newly picked folder has no data for this game.
                 let knownTitles = Dictionary(uniqueKeysWithValues: entries.map { ($0.id.uppercased(), $0.title) })
                 var identityOwners: [RomfsIdentity: String] = [:]
                 var ambiguousIdentities = Set<RomfsIdentity>()
@@ -1185,23 +1321,39 @@ public struct ShellHostConfig: Sendable {
                 }
                 let knownIdentities = identityOwners
                 let finding = await Task.detached(priority: .userInitiated) {
-                    DataFolderDiagnostics.diagnose(folder: url, manifest: manifest, knownTitles: knownTitles, knownIdentities: knownIdentities)
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    return DataFolderDiagnostics.diagnose(folder: url, manifest: manifest, knownTitles: knownTitles, knownIdentities: knownIdentities)
                 }.value
-                guard pickGeneration[id] == generation, let latestEntry = entry(id) else { return }
+                guard pickGeneration[id] == generation, let refreshedEntry = entry(id) else { return }
                 let message = DataFolderDiagnostics.message(
                     for: finding,
-                    gameTitle: latestEntry.title,
+                    gameTitle: refreshedEntry.title,
                     gameID: id,
                     folderName: url.lastPathComponent
                 )
-                if !data(for: latestEntry).found {
+                if !data(for: refreshedEntry).found {
                     pickedDataNotes[id] = message
                     refresh(id)
                 }
                 notice = message
-            } else if let game = details.first(where: { $0.id == id })?.game, Self.isMissingOrNeedsUpdate(game.state) {
-                notice = hostText("No game data for \(game.title) was found in that folder.")
+                return
             }
+        }
+
+        pickedDataNotes.removeValue(forKey: id)
+        guard dataStore(id).store(url) else {
+            notice = hostText("That location could not be remembered. Try a different one.")
+            return
+        }
+        forgetCheckedRomfsImages()
+        guard let latestEntry = entry(id) else { return }
+        let resolved = await verifiedData(for: latestEntry)
+        guard pickGeneration[id] == generation else { return }
+        refresh(id)
+        if resolved.source != .picked,
+           let game = details.first(where: { $0.id == id })?.game, Self.isMissingOrNeedsUpdate(game.state) {
+            notice = hostText("No game data for \(game.title) was found in that folder.")
         }
     }
 
@@ -1226,8 +1378,62 @@ public struct ShellHostConfig: Sendable {
         refresh(id)
     }
 
+    private enum ShellDataFolderCheck: Sendable {
+        case unreadable
+        case noGameData
+        case matched
+    }
+
     func pickShellDataNow() async {
         guard let url = await pickedFolder() else { return }
+        shellDataPickGeneration &+= 1
+        let generation = shellDataPickGeneration
+        let manifests = entries.compactMap { entry in
+            entry.problem == nil ? entry.manifest : nil
+        }
+        let check = await Task.detached(priority: .userInitiated) { () -> ShellDataFolderCheck in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+                return .unreadable
+            }
+            let index = ShellDataIndex(folder: url)
+            if manifests.isEmpty {
+                return index.hasAnyImage ? .matched : .noGameData
+            }
+            let appFallback = FileManager.default.temporaryDirectory.appendingPathComponent("nx-unused-\(UUID().uuidString)", isDirectory: true)
+            for manifest in manifests {
+                let shellMatch: URL?
+                if let ident = RomfsIdentity.parse(manifest.romfsIdentity) {
+                    shellMatch = index.imageURL(matching: ident, preferredChain: manifest.chain, explicitGfxAPI: manifest.gfxAPI)
+                } else {
+                    shellMatch = nil
+                }
+                let resolved = DataLocator.locate(
+                    manifest: manifest,
+                    picked: .none,
+                    appFolder: appFallback,
+                    global: .url(url),
+                    shellMatch: shellMatch
+                )
+                if resolved.source == .shell {
+                    return .matched
+                }
+            }
+            return .noGameData
+        }.value
+        guard shellDataPickGeneration == generation else { return }
+        switch check {
+        case .unreadable:
+            notice = hostText("That folder could not be remembered. Try a different one.")
+            return
+        case .noGameData:
+            notice = hostText("No game data for your installed games was found in “\(url.lastPathComponent)”. Choose a folder containing a game's romfs.img.")
+            return
+        case .matched:
+            break
+        }
         guard shellData.store(url) else { notice = hostText("That folder could not be remembered. Try a different one."); return }
         forgetCheckedRomfsImages()
         shellSettings.storeDataFolderName(url.lastPathComponent)
@@ -1256,6 +1462,7 @@ public struct ShellHostConfig: Sendable {
     }
 
     func clearShellData() {
+        shellDataPickGeneration &+= 1
         shellData.clear()
         shellSettings.clearDataFolderName()
         refreshAll()
@@ -1659,6 +1866,7 @@ public struct ShellHostConfig: Sendable {
             romfsURL: resolved.romfsURL, appFolder: gameAppFolder, environment: launchEnvironment(profile: profile, id: id),
             cloudSavesURL: cloud, shellEnvironment: shellSettings.gameDefaults,
             shellFallbackKeys: launchShellFallbackKeys(profile: profile, id: id),
+            builtInDefaultKeys: launchBuiltInDefaultKeys(profile: profile, id: id),
             fallbackBundledFrameworkURL: latestEntry.fallbackBundledFrameworkURL)
         if case .trailer = shaderSource {
             game.usesEmbeddedShaderTrailer = true
@@ -1846,6 +2054,11 @@ public struct ShellHostConfig: Sendable {
             var usedCachedReceipt = false
 
             if let hotRoot, isHotExternal {
+                guard config.supportsHotFrameworkLoading() else {
+                    throw HotFrameworkUnsupportedError(
+                        message: hostText("This app signature does not support loading games from Documents/Frameworks. Reinstall the app from NX2Apple on your computer.")
+                    )
+                }
                 let fwURL = game.frameworkURL
                 let hostID = config.hostBundleID()
                 let store = sideloadCertificateStore
@@ -1873,6 +2086,7 @@ public struct ShellHostConfig: Sendable {
 
             do {
                 try await launcher.launch(game)
+                recordSessionDidStart(for: game)
                 return .launched
             } catch let launchError {
                 // If an external framework skipped signing via a cached `.nx-local-sign.json` receipt and then failed
@@ -1906,6 +2120,7 @@ public struct ShellHostConfig: Sendable {
                 }
                 do {
                     try await launcher.launch(game)
+                    recordSessionDidStart(for: game)
                     return .launched
                 } catch {
                     // Keep the receipt cleared after a failed retry so the next attempt can recover cleanly.
@@ -1957,17 +2172,23 @@ public struct ShellHostConfig: Sendable {
             .map { $0.replacingOccurrences(of: "\n", with: " ") }.joined(separator: "\n")
     }
 
-    /// DM_GAME_MENU_TEXT: the in-game menu's own words in the player's language, one per line in the engine's order (patch 0124, GameMenu.swift):
-    /// its title and Controller layout (#1129).
+    /// DM_GAME_MENU_TEXT: the in-game menu's own words in the player's language, one per line in the engine's order (GameMenu.swift):
+    /// title, Controller layout, Tap layout, Set in env.txt, and "%@, set in env.txt".
     static var gameMenuText: String {
-        [hostText("More settings on the start screen"), hostText("Controller layout")]
+        let currentEnvTemplate = HostStrings.bundle.localizedString(forKey: "%@, set in env.txt", value: "%@, set in env.txt", table: nil)
+        return [hostText("More settings on the start screen"),
+                hostText("Controller layout"),
+                hostText("Tap"),
+                hostText("Set in env.txt"),
+                currentEnvTemplate]
             .map { $0.replacingOccurrences(of: "\n", with: " ") }.joined(separator: "\n")
     }
 
     /// A game's values for the engine: its own choices, then the shell's defaults. A game whose settings list has no
     /// performance overlay row still gets the shell's choice.
     func launchEnvironment(profile: LauncherProfile, id: String) -> [String: String] {
-        var env = GameSettingsStore(profile: profile, defaults: config.defaults(id), shell: shellSettings.gameDefaults).values()
+        let envOverrides = gameEnvOverrides(for: id)
+        var env = GameSettingsStore(profile: profile, defaults: config.defaults(id), shell: shellSettings.gameDefaults, envFile: envOverrides).values()
         for (key, value) in shellSettings.gameDefaults where env[key] == nil { env[key] = value }
         // The words the engine shows once per launch where the 3D layout's undrawn right stick is (patch 0067), in the player's language.
         env["DM_TOUCH_HINT"] = Self.touchHint
@@ -1977,7 +2198,7 @@ public struct ShellHostConfig: Sendable {
         env["DM_HOME_QUIT_TEXT"] = Self.quitPromptText(gameName: entry(id)?.title ?? id)
         // The in-game menu's own words (patch 0124), as the Mac's build bakes them into a game's own app.
         env["DM_GAME_MENU_TEXT"] = Self.gameMenuText
-        if let shellMenu = ShellInGameMenu.encode(profile: profile, titleID: id, shellDefaults: shellSettings.gameDefaults) {
+        if let shellMenu = ShellInGameMenu.encode(profile: profile, titleID: id, shellDefaults: shellSettings.gameDefaults, envFileOverrides: envOverrides) {
             env["DM_SHELL_MENU"] = shellMenu
         }
         // A launcher.json DM_PAD_MAP row is authoritative, including an empty value.
@@ -1989,13 +2210,18 @@ public struct ShellHostConfig: Sendable {
     }
 
     func launchShellFallbackKeys(profile: LauncherProfile, id: String) -> Set<String> {
-        let store = GameSettingsStore(profile: profile, defaults: config.defaults(id), shell: shellSettings.gameDefaults)
+        let store = makeSettingsStore(for: id, profile: profile)
         var keys = Set(profile.settings.filter { store.isFromShell($0) }.map(\.env))
         let profileEnvs = Set(profile.settings.map(\.env))
         for key in shellSettings.gameDefaults.keys where !profileEnvs.contains(key) {
             keys.insert(key)
         }
         return keys
+    }
+
+    func launchBuiltInDefaultKeys(profile: LauncherProfile, id: String) -> Set<String> {
+        let store = makeSettingsStore(for: id, profile: profile)
+        return Set(profile.settings.filter { !store.hasExplicitChoice($0) && !store.isFromShell($0) }.map(\.env))
     }
 
     // MARK: Controllers
@@ -2051,4 +2277,9 @@ public struct ShellHostConfig: Sendable {
     static func info(for c: ConnectedController) -> ControllerInfo {
         ControllerInfo(id: c.id, name: c.name, player: hostText("Player \(c.player)"), batteryPercent: c.batteryPercent, charging: c.charging)
     }
+}
+
+private struct HotFrameworkUnsupportedError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }

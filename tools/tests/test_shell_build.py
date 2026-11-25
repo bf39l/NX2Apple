@@ -150,6 +150,41 @@ class ShellMainProvidesWhatFrontIosTakes(unittest.TestCase):
             'ShellGlue.h must stay identical between frontend-ios/Shell/App and engine/dm/ios/framework',
         )
 
+    def test_framework_plist_orientations_reads_host_bundle(self):
+        front = (ENGINE / 'dm/ios/Sources/front_ios.m').read_text()
+        self.assertNotIn('bundleForClass:DmRootVC.class', front,
+                         'Shared shell framework must read the host app Info.plist orientations rather than hardcoding landscape on iPhone')
+
+    @unittest.skipUnless(shutil.which('clang'), 'requires clang to exercise ShellOrientation.h')
+    def test_shell_orientation_masks(self):
+        shell_dir = ROOT / 'frontend-ios/Shell/App'
+        shell_main = (shell_dir / 'ShellMain.m').read_text()
+        self.assertIn('dm_shell_orientation_mask', shell_main)
+        self.assertIn('dm_shell_library_orientation_mask', shell_main)
+        c_src = '\n'.join([
+            '#include <assert.h>',
+            '#include <stddef.h>',
+            '#include "ShellOrientation.h"',
+            'int main(void) {',
+            '    assert(dm_shell_library_orientation_mask(true) == DM_SHELL_ORIENT_ALL_BUT_UPSIDE_DOWN);',
+            '    assert(dm_shell_library_orientation_mask(false) == DM_SHELL_ORIENT_ALL);',
+            '    assert(dm_shell_orientation_mask(false, "landscape", true) == DM_SHELL_ORIENT_ALL_BUT_UPSIDE_DOWN);',
+            '    assert(dm_shell_orientation_mask(true, NULL, true) == DM_SHELL_ORIENT_ALL_BUT_UPSIDE_DOWN);',
+            '    assert(dm_shell_orientation_mask(true, "auto", true) == DM_SHELL_ORIENT_ALL_BUT_UPSIDE_DOWN);',
+            '    assert(dm_shell_orientation_mask(true, "auto", false) == DM_SHELL_ORIENT_ALL);',
+            '    assert(dm_shell_orientation_mask(true, "landscape", true) == DM_SHELL_ORIENT_LANDSCAPE);',
+            '    assert(dm_shell_orientation_mask(true, "portrait", true) == DM_SHELL_ORIENT_PORTRAIT);',
+            '    assert(dm_shell_orientation_mask(true, "portrait", false) == (DM_SHELL_ORIENT_PORTRAIT | DM_SHELL_ORIENT_PORTRAIT_UPSIDE_DOWN));',
+            '    return 0;',
+            '}',
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'orientation_test.c'
+            exe = Path(tmp) / 'orientation_test'
+            src.write_text(c_src)
+            subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-I', str(shell_dir), str(src), '-o', str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
 
 @unittest.skipUnless(HAS_TOOLS and font_python() and (ENGINE / 'dm/gfx/nvn/dmsh_chain.h').is_file(),
                      'needs macOS, XcodeGen, an iPhoneOS SDK, synced engine/ and a python with fontTools')
@@ -192,8 +227,13 @@ class ShellBuild(unittest.TestCase):
         self.assertEqual(set(info['UISupportedInterfaceOrientations~ipad']),
                          landscape | {'UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown'})
         self.assertEqual('b-' + info['DMChain'], chain)
-        self.assertEqual(info['CFBundleIcons']['CFBundlePrimaryIcon']['CFBundleIconName'], 'AppIcon')
-        self.assertTrue((app / 'Assets.car').is_file())
+        if 'Gen/LegacyIcons' in (shell / 'project.yml').read_text():
+            self.assertEqual(info['CFBundleIcons']['CFBundlePrimaryIcon']['CFBundleIconFiles'], ['AppIcon60x60'])
+            self.assertTrue((app / 'AppIcon60x60@3x.png').is_file())
+            self.assertFalse((app / 'Assets.car').exists())
+        else:
+            self.assertEqual(info['CFBundleIcons']['CFBundlePrimaryIcon']['CFBundleIconName'], 'AppIcon')
+            self.assertTrue((app / 'Assets.car').is_file())
         self.assertEqual(info['UIApplicationSceneManifest']['UISceneConfigurations']['UIWindowSceneSessionRoleApplication'][0]['UISceneDelegateClassName'], 'SceneDelegate')
         self.assertTrue((app / f'Frameworks/{fw.name}/{fw.stem}').is_file())
         self.assertTrue((app / f'Frameworks/{fw.name}/game.manifest.json').is_file())

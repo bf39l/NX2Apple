@@ -208,7 +208,7 @@ enum ConsoleInput: Equatable {
     private func pageContext(_ sheet: ConsoleSheet) -> ConsolePageContext {
         if let game = panelGame(sheet) {
             return ConsolePageContext(image: game.hero ?? game.artwork, focus: game.hero != nil ? game.heroFocus : game.artworkFocus,
-                                      title: game.title, subtitle: gameLine(game))
+                                      title: game.title, subtitle: gameLine(game), tags: gameTags(game))
         }
         let backdrop = state.focusedGame
         func around(_ title: String, _ subtitle: String = "") -> ConsolePageContext {
@@ -229,13 +229,26 @@ enum ConsoleInput: Equatable {
         }
     }
 
-    /// The secondary line under a game's title: where it plays and how it stands.
+    /// Platform and engine pills shown beneath the game's title in console details.
+    func gameTags(_ game: ConsoleGame) -> [ConsoleContextTag] {
+        var tags = game.platforms.map { ConsoleContextTag(title: t($0.labelKey), emphasized: false, width: .platform) }
+        if let built = game.activeEngineBadgeName {
+            tags.append(ConsoleContextTag(title: built, emphasized: true, width: .engine))
+        } else if !game.tunedEngineNames.isEmpty {
+            tags.append(ConsoleContextTag(title: t("library.chip.tunedAvailable"), emphasized: true, width: .auto))
+        }
+        if game.genericBuild != nil {
+            tags.append(ConsoleContextTag(title: t("nxkit.generic.badge"), emphasized: true, width: .auto))
+        }
+        return tags
+    }
+
+    /// The short status line under a game's pills: readiness and game version.
     private func gameLine(_ game: ConsoleGame) -> String {
         let status = state.pausedGameID == game.id ? t("console.paused")
             : game.status == .ready && game.olderTools ? t("library.olderTools") : t(game.status.labelKey)
-        let engine = game.isMacNativeGames ? [t("library.chip.mng")] : []   // built with MacNativeGames
         let version = game.version.isEmpty ? [] : [String(format: t("console.version"), game.version)]
-        return (game.platforms.map { t($0.labelKey) } + [status] + engine + version).joined(separator: " \u{00b7} ")
+        return ([status] + version).joined(separator: " \u{00b7} ")
     }
 
     private func hint(_ role: ConsoleGlyphs.Role, _ key: String, _ action: @escaping () -> Void) -> ConsoleHintItem {
@@ -278,6 +291,9 @@ enum ConsoleInput: Equatable {
         case let .cloudSave(question):   // ConsoleCloudSaveView.swift (#957)
             ConsoleCloudSaveView(question: question, lang: lang, compact: compact, choose: { driver.chooseCloudSave($0) },
                                  retry: { driver.retryCloudSave() }, cancel: { driver.back() })
+        case let .mngMigration(question):
+            ConsoleMngMigrationView(question: question, lang: lang, compact: compact,
+                                    choose: { driver.chooseMngMigration($0) }, cancel: { driver.back() })
         case .menu: menu(compact: compact)
         case .library: library(compact: compact)
         case .settings: settings(compact: compact)
@@ -574,6 +590,7 @@ enum ConsoleInput: Equatable {
         case .explanation: return "console.explanationTitle"
         case .homeButtonHint: return "console.homeHint.title"
         case let .cloudSave(question): return question.outcome == .unreadable ? "cloudCheck.unreadable.title" : "cloudCheck.differ.title"
+        case .mngMigration: return "mng.migration.title"
         case .menu: return "console.menu"
         case .mapping: return state.mappingGameID == nil ? "console.mapping" : "console.mapping.game"
         case .gamePad: return "console.gamePad"
@@ -616,6 +633,7 @@ enum ConsoleInput: Equatable {
         case .explanation: pad.focused = "console.explanation.desktop"
         case .homeButtonHint: pad.focused = "console.homeHint.open"
         case let .cloudSave(question): pad.focused = ConsoleCloudSaveView.firstFocus(question)
+        case .mngMigration: pad.focused = ConsoleMngMigrationView.firstFocus
         case .menu: pad.focused = "console.menu.allGames"
         case .cloudSaves: pad.focused = ConsoleCloudSaves.sorted(state.saveRows).first.map { "console.saves.row." + $0.id } ?? "console.saves.close"   // the first row as the page sorts them
         case .library: pad.focused = ConsolePref.onLibrary.first.map { "console.pref." + $0.rawValue } ?? "console.library.saves"

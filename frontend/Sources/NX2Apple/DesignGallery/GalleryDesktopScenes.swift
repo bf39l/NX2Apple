@@ -52,6 +52,10 @@ enum GalleryDesktopScene: String, CaseIterable {
     // MacNativeGames, LNPANDY/NX2Apple#1473 (GalleryMacNativeGames.swift)
     case mngLibrary, mngRecommend, mngRecommendInstalled, mngBlocked, mngDropdownDisabled, mngUpdateAvailable
     case mngDownloadOffered, mngDownloadingSettings
+    // Mac fast shader build (--seen-shaders)
+    case macSeenShaders
+    // Seed compression settings row in Settings > Tools > Storage
+    case seedCompressionStorage
 
     var title: String {
         switch self {
@@ -91,7 +95,7 @@ enum GalleryDesktopScene: String, CaseIterable {
         case .sendCopying: return "Copy to a drive: copying"
         case .sendCopied: return "Copy to a drive: copied"
         case .queueEveryState: return "Queue: every state"
-        case .queueRunning: return "Queue: running, up next"
+        case .queueRunning: return "Queue: running"
         case .transfersEveryState: return "Transfers: every state"
         case .logOpen: return "Build log open"
         case .footerVerifying: return "Activity: verifying the first start"
@@ -142,6 +146,8 @@ enum GalleryDesktopScene: String, CaseIterable {
         case .mngUpdateAvailable: return "MacNativeGames: newer version on GitHub"
         case .mngDownloadOffered: return "Engine not installed: Download offered"
         case .mngDownloadingSettings: return "Engine downloading from Settings"
+        case .macSeenShaders: return "Builds: Mac fast shader build"
+        case .seedCompressionStorage: return "Settings: storage and seed compression"
         }
     }
 
@@ -150,9 +156,9 @@ enum GalleryDesktopScene: String, CaseIterable {
         case .filterOwned, .filterMac, .filterIOS, .sortName: return .allGames
         case .completionExported, .completionNeedsData, .sendSending, .sendSent, .sendAppNotFound, .sendChooseApp, .sendRefused, .sendFailed,
              .sendCopying, .sendCopied, .queueEveryState, .queueRunning, .transfersEveryState, .logOpen,
-             .footerVerifying, .footerExporting, .footerInstalling, .footerRenewing, .footerSending, .mngRecommend, .mngRecommendInstalled, .engineDropdown: return .builds
+             .footerVerifying, .footerExporting, .footerInstalling, .footerRenewing, .footerSending, .mngRecommend, .mngRecommendInstalled, .engineDropdown, .macSeenShaders: return .builds
         case .appChecking, .appDownloading, .appPreparing, .appAvailable, .engineExperimental, .missingTool, .players, .libraryFolders,
-             .mngBlocked, .mngUpdateAvailable, .mngDropdownDisabled, .mngDownloadOffered, .mngDownloadingSettings: return .settings
+             .mngBlocked, .mngUpdateAvailable, .mngDropdownDisabled, .mngDownloadOffered, .mngDownloadingSettings, .seedCompressionStorage: return .settings
         case .nxkitIdle, .nxkitChecking, .nxkitWaiting, .nxkitUnreachable, .nxkitAppleSilicon, .nxkitBadSignature, .nxkitChecksum,
              .nxkitIncompatible, .nxkitIncomplete, .nxkitDownload, .nxkitUnpack, .nxkitCancelled: return .nxkit
         case .savesNoDevices, .savesNotConnected, .savesNotInstalled, .savesReading, .savesReady, .savesFailed, .savesTimedOut,
@@ -167,6 +173,8 @@ enum GalleryDesktopScene: String, CaseIterable {
         switch self {
         case .appChecking, .appDownloading, .appPreparing, .appAvailable, .players: return CGSize(width: 1280, height: 1500)
         case .logOpen, .transfersEveryState: return CGSize(width: 1280, height: 2000)
+        case .macSeenShaders: return CGSize(width: 1280, height: 1120)
+        case .seedCompressionStorage: return CGSize(width: 1280, height: 1850)
         default: return nil
         }
     }
@@ -206,7 +214,7 @@ extension GalleryFixtures {
         func onDevice(_ index: Int) {
             let app = directory.appendingPathComponent("ios-" + UUID().uuidString + "/Game.app")
             try? FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
-            try? PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "org.nxnative.gallery.ios"], format: .xml, options: 0)
+            try? PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": GalleryDefaults.domain("gallery-ios")], format: .xml, options: 0)
                 .write(to: app.appendingPathComponent("Info.plist"))
             stores.deviceStore.devices = [AppleDevice(id: "gallery-iphone", name: "iPhone", model: "iPhone17,1", os: "26.1", reachable: true)]
             edit(index) { $0.iosAppPath = app.path; $0.installedDevice = "gallery-iphone" }
@@ -271,7 +279,7 @@ extension GalleryFixtures {
 
         switch scene {
         case .cardEveryState:
-            // 0 Mac, 1 iPhone only, 2 both, 3 building, 4 files to fix, 5 not built, the rest without their files
+            // 0 Mac, 1 iPhone only, 2 both, 3 building, 4 files to fix, 5 not built, 6 queued, the rest without their files
             _ = makeMacApp(for: 0, in: library)
             let ipa = file("Game.ipa")
             edit(1) { $0.ipaPath = ipa }
@@ -282,8 +290,10 @@ extension GalleryFixtures {
             edit(4) { $0.appPath = broken.path }
             let base = file("base.nsp")
             edit(5) { $0.inputs["base"] = [base] }
+            edit(6) { $0.inputs["base"] = [base] }
             build.buildingGame = true   // the building card's game: a build runs for it
             build.running = true
+            stores.queue.enqueue([QueueEntry(game: library.games[6], engineID: stores.engineSync.selection.engineID, target: BuildTarget.mac)])
             return launcher(GalleryLauncher(allGames: true, activeBuildID: library.games[3].id))
         case .heroPlay:
             _ = makeMacApp(for: 0, in: library)
@@ -420,6 +430,23 @@ extension GalleryFixtures {
             stores.engineSync.selection = EngineSelection(channel: .experimental, engineID: String(repeating: "e", count: 40), version: "1.6.0-beta", previousID: "")
             if stores.engineSync.bundle == nil { stores.engineSync.bundle = URL(fileURLWithPath: "/nonexistent/nx-gallery-engine") }
             return launcher(GalleryLauncher(page: .settings, category: .tools))
+        case .seedCompressionStorage:
+            Self.releaseEngine(stores)
+            stores.defaults.set("/Volumes/Games/NX2Apple-shell", forKey: "shellRoot")
+            stores.defaults.set("/Volumes/Games/NX2Apple-nxkit", forKey: BuildCacheRoots.nxkitKey)
+            stores.defaults.set("/Volumes/Games/NX2Apple-build-seeds/build-seeds", forKey: BuildCacheRoots.seedKey)
+            let sampleScan = SeedScanResult(
+                seedRoot: "/Volumes/Games/NX2Apple-build-seeds/build-seeds",
+                zstdAvailable: true,
+                totalGames: 2,
+                totalFiles: 2,
+                uncompressedBytes: 1_280_000_000,
+                estimatedCompressedBytes: 102_400_000,
+                estimatedSavedBytes: 1_177_600_000,
+                games: []
+            )
+            stores.seedCompression.setGalleryState(phase: nil, scanState: .ready(hasAnySeeds: true, scan: sampleScan, zstdConfirmed: true))
+            return launcher(GalleryLauncher(page: .settings, category: .tools))
         case .missingTool:
             stores.dependencies.deps = [Dep(id: "xcode", name: "Xcode", hint: "", present: true, installCmd: []),
                                         Dep(id: "python", name: "Python 3.12", hint: "", present: false, installCmd: [])]
@@ -493,6 +520,13 @@ extension GalleryFixtures {
                 .frame(width: 280).padding(DS.Space.xl).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading))
         case .engineDropdown:
             return AnyView(launcher(GalleryLauncher(page: .builds, editor: true)).environment(\.engineDropdownInitiallyOpen, true))
+        case .macSeenShaders:
+            configureBuild(stores, library: library)
+            build.selectUpstream(.nxnative)
+            build.target = BuildTarget.mac
+            build.seenShadersOnly = true
+            build.setSeenShadersForGallery(SeenShadersInfo(seenCount: 8157, totalCount: 131426))
+            return launcher(GalleryLauncher(page: .builds, editor: true))
         }
     }
 }

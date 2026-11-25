@@ -281,7 +281,8 @@ struct PadMappingCard: View {
             .onChange(of: focus.id) { _, id in
                 guard focus.visible, shown == nil, let id,
                       id.hasPrefix("map.row.") || id == "map.swap.toggle" else { return }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo(id, anchor: .center) }
+                let scrollID = id.hasPrefix("map.row.pad.") ? String(id.dropFirst("map.row.pad.".count)) : id
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo(scrollID, anchor: .center) }
             }
         }
     }
@@ -393,7 +394,7 @@ struct PadMappingCard: View {
                         Text(ShellStrings.text("Button mapping")).shellType(ShellType.flowTitle(20)).lineLimit(2)
                             .accessibilityAddTraits(.isHeader).accessibilityIdentifier("padMapping.title")
                     }
-                    Text(title).shellType(ShellType.note).foregroundStyle(.white.opacity(0.5)).lineLimit(2)
+                    Text(title).shellType(ShellType.note).foregroundStyle(.white.opacity(0.62)).lineLimit(2)
                 }
             }
             Spacer(minLength: 8)
@@ -420,7 +421,7 @@ struct PadMappingCard: View {
         HStack(spacing: 12) {
             HStack(spacing: 8) {
                 ChangedDot()
-                Text(ShellStrings.text("Changed")).shellType(ShellType.note).foregroundStyle(.white.opacity(0.55))
+                Text(ShellStrings.text("Changed")).shellType(ShellType.note).foregroundStyle(.white.opacity(0.62))
             }
             .opacity(changedAny ? 1 : 0)
             .accessibilityHidden(true)
@@ -441,7 +442,7 @@ struct PadMappingCard: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(ShellStrings.text(isGame ? "For this game only. A button left alone does what it does in all games."
                                           : "For controllers in games only. This app’s menus keep A to confirm and B to go back."))
-                .shellType(ShellType.note).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
+                .shellType(ShellType.note).foregroundStyle(.white.opacity(0.62)).fixedSize(horizontal: false, vertical: true)
             drawing
             if let swapRow { swap(swapRow) }
             ForEach(PadMap.groups, id: \.title) { group in
@@ -457,7 +458,7 @@ struct PadMappingCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(ShellPalette.hairline))
                     if group.buttons.first == "A" {
                         Text(ShellStrings.text("Named as on a Switch controller, by where they sit."))
-                            .shellType(ShellType.note).foregroundStyle(.white.opacity(0.4)).fixedSize(horizontal: false, vertical: true)
+                            .shellType(ShellType.note).foregroundStyle(.white.opacity(0.60)).fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 4)
                     }
                 }
@@ -507,7 +508,7 @@ struct PadMappingCard: View {
                 if !row.fromShell { ChangedDot() }
             }
             Text(ShellStrings.text("Puts A on the bottom button, where Xbox and PlayStation controllers confirm."))
-                .shellType(ShellType.note).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
+                .shellType(ShellType.note).foregroundStyle(.white.opacity(0.62)).fixedSize(horizontal: false, vertical: true)
             ViewThatFits(in: .horizontal) {
                 control([options])
                 control(options.map { [$0] })

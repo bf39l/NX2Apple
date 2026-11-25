@@ -20,6 +20,12 @@ package struct GameRefreshAssessment: Equatable, Sendable {
     package var missingOriginalPackage: Bool
     package var hasUsableSeed: Bool = false
     package var expectedRomfsIdentity: String? = nil
+    package var canSeedRefreshMac: Bool = false
+    package var canSeedRefreshIOS: Bool = false
+    package var needsShaderRebuildMac: Bool = false
+    package var needsShaderRebuildIOS: Bool = false
+    package var shaderRebuildReasonMac: ShaderRebuildReason? = nil
+    package var shaderRebuildReasonIOS: ShaderRebuildReason? = nil
 
     package init(
         heroState: HeroRefreshState,
@@ -30,7 +36,13 @@ package struct GameRefreshAssessment: Equatable, Sendable {
         needsMissingImgGuideIOS: Bool,
         missingOriginalPackage: Bool,
         hasUsableSeed: Bool = false,
-        expectedRomfsIdentity: String? = nil
+        expectedRomfsIdentity: String? = nil,
+        canSeedRefreshMac: Bool? = nil,
+        canSeedRefreshIOS: Bool? = nil,
+        needsShaderRebuildMac: Bool = false,
+        needsShaderRebuildIOS: Bool = false,
+        shaderRebuildReasonMac: ShaderRebuildReason? = nil,
+        shaderRebuildReasonIOS: ShaderRebuildReason? = nil
     ) {
         self.heroState = heroState
         self.hasSpecificUpdate = hasSpecificUpdate
@@ -41,9 +53,17 @@ package struct GameRefreshAssessment: Equatable, Sendable {
         self.missingOriginalPackage = missingOriginalPackage
         self.hasUsableSeed = hasUsableSeed
         self.expectedRomfsIdentity = expectedRomfsIdentity
+        self.canSeedRefreshMac = canSeedRefreshMac ?? canFastRefreshMac
+        self.canSeedRefreshIOS = canSeedRefreshIOS ?? canFastRefreshIOS
+        self.needsShaderRebuildMac = needsShaderRebuildMac
+        self.needsShaderRebuildIOS = needsShaderRebuildIOS
+        self.shaderRebuildReasonMac = shaderRebuildReasonMac
+        self.shaderRebuildReasonIOS = shaderRebuildReasonIOS
     }
 
     package var canFastRefreshAny: Bool { canFastRefreshMac || canFastRefreshIOS }
+    package var canSeedRefreshAny: Bool { canSeedRefreshMac || canSeedRefreshIOS }
+    package var needsShaderRebuildAny: Bool { needsShaderRebuildMac || needsShaderRebuildIOS }
 }
 
 /// Catalog of game-specific compatibility or performance updates per release and refresh eligibility evaluation.
@@ -64,34 +84,42 @@ package enum GameUpdateCatalog {
 
     /// Uppercase 16-hex TitleIDs mapped to the most recent release carrying game-specific updates (unlisted defaults to "1.2.0").
     package static let updatedVersions: [String: String] = [
-        // 1.5.0 (80 titles)
+        // 1.5.1 (35 titles)
+        "01001C8016B4E000": "1.5.1", "0100317013770000": "1.5.1", "010037C022390000": "1.5.1",
+        "010038B015560000": "1.5.1", "01004200189F4000": "1.5.1", "010051C0134F8000": "1.5.1",
+        "01005CA01580E000": "1.5.1", "010062E01FE0C000": "1.5.1", "010063100B2C2000": "1.5.1",
+        "010067300059A000": "1.5.1", "01006DC010326000": "1.5.1", "01006F8002326000": "1.5.1",
+        "010070E022546000": "1.5.1", "01007330027EE000": "1.5.1", "010074F013262000": "1.5.1",
+        "01007D7001D0E000": "1.5.1", "01007EF00011E000": "1.5.1", "01008B900DC0A000": "1.5.1",
+        "01008CB0156BC000": "1.5.1", "01008F2005154000": "1.5.1", "010095300B6A4000": "1.5.1",
+        "010099801C4FA000": "1.5.1", "010099801C4FA001": "1.5.1", "0100A00019DE0000": "1.5.1",
+        "0100B7C00933A000": "1.5.1", "0100BF00112C0000": "1.5.1", "0100C49025D3E000": "1.5.1",
+        "0400380020056000": "1.5.1", "0400486024DEC000": "1.5.1", "040074A01BF12000": "1.5.1",
+        "04008E001F098000": "1.5.1", "0400A3A01EE4C000": "1.5.1", "0400C3F00006E000": "1.5.1",
+        "0400C76024710000": "1.5.1", "0400E88025B1A000": "1.5.1",
+        // 1.5.0 (66 titles)
         "0100000000010000": "1.5.0", "010015100B514000": "1.5.0", "0100152000022000": "1.5.0",
-        "01001B300B9BE000": "1.5.0", "01001C8016B4E000": "1.5.0", "01001F5010DFA000": "1.5.0",
-        "010026300BA4A000": "1.5.0", "010027400CDC6000": "1.5.0", "010029D00E740000": "1.5.0",
-        "01002D4007AE0000": "1.5.0", "01003FC01670C000": "1.5.0", "010042D00D900000": "1.5.0",
-        "010044500C182000": "1.5.0", "0100453019AA8000": "1.5.0", "01004680124E6000": "1.5.0",
-        "010049900F546000": "1.5.0", "01004B800AF5A000": "1.5.0", "010050F00BC1A000": "1.5.0",
-        "010051701FB46000": "1.5.0", "010057A01E4D4000": "1.5.0", "01005CA01580E000": "1.5.0",
-        "01005FF002E2A000": "1.5.0", "010064800F66A000": "1.5.0", "010069401ADB8000": "1.5.0",
-        "01006A800016E000": "1.5.0", "01006F8002326000": "1.5.0", "0100726014352000": "1.5.0",
+        "01001B300B9BE000": "1.5.0", "01001F5010DFA000": "1.5.0", "010026300BA4A000": "1.5.0",
+        "010027400CDC6000": "1.5.0", "010029D00E740000": "1.5.0", "01002D4007AE0000": "1.5.0",
+        "01003FC01670C000": "1.5.0", "010042D00D900000": "1.5.0", "010044500C182000": "1.5.0",
+        "0100453019AA8000": "1.5.0", "01004680124E6000": "1.5.0", "010049900F546000": "1.5.0",
+        "01004B800AF5A000": "1.5.0", "010050F00BC1A000": "1.5.0", "010051701FB46000": "1.5.0",
+        "010057A01E4D4000": "1.5.0", "01005FF002E2A000": "1.5.0", "010064800F66A000": "1.5.0",
+        "010069401ADB8000": "1.5.0", "01006A800016E000": "1.5.0", "0100726014352000": "1.5.0",
         "0100777022394000": "1.5.0", "01007820196A6000": "1.5.0", "01007A2027548000": "1.5.0",
-        "01007EF00011E000": "1.5.0", "0100801011C3E000": "1.5.0", "0100830004FB6000": "1.5.0",
-        "010087701B092000": "1.5.0", "01008D300C50C000": "1.5.0", "01008F4014A74000": "1.5.0",
-        "0100A00019DE0000": "1.5.0", "0100A0800E9C4000": "1.5.0", "0100A3D008C5C000": "1.5.0",
-        "0100A5C00D162000": "1.5.0", "0100A7C01B792000": "1.5.0", "0100A8E016236000": "1.5.0",
-        "0100AA001415E000": "1.5.0", "0100AA201415C000": "1.5.0", "0100B7C00933A000": "1.5.0",
-        "0100B99019412000": "1.5.0", "0100BF00112C0000": "1.5.0", "0100BF500207C000": "1.5.0",
-        "0100C1F0051B6000": "1.5.0", "0100C3601518C000": "1.5.0", "0100C49025D3E000": "1.5.0",
-        "0100C510166F0000": "1.5.0", "0100C9C00E25C000": "1.5.0", "0100CAA026246000": "1.5.0",
-        "0100CD701434C000": "1.5.0", "0100D440269E8000": "1.5.0", "0100D4900E82C000": "1.5.0",
-        "0100D5501857E000": "1.5.0", "0100D71004694000": "1.5.0", "0100D800117F4000": "1.5.0",
-        "0100DBF01000A000": "1.5.0", "0100EB100AB42000": "1.5.0", "0100F28011892000": "1.5.0",
-        "0100F2C0115B6000": "1.5.0", "0100F43008C44000": "1.5.0", "040015100B514001": "1.5.0",
-        "040032B023CA4000": "1.5.0", "0400380020056000": "1.5.0", "040041E0212AE000": "1.5.0",
-        "0400486024DEC000": "1.5.0", "0400569027BF4000": "1.5.0", "040057C02159A000": "1.5.0",
-        "040074A01BF12000": "1.5.0", "040077201BE50000": "1.5.0", "04007EF01F8AE000": "1.5.0",
-        "04008E001F098000": "1.5.0", "0400921025B32000": "1.5.0", "0400C3F00006E000": "1.5.0",
-        "0400C76024710000": "1.5.0", "0400D4201C6EA000": "1.5.0",
+        "0100801011C3E000": "1.5.0", "0100830004FB6000": "1.5.0", "010087701B092000": "1.5.0",
+        "01008D300C50C000": "1.5.0", "01008F4014A74000": "1.5.0", "0100A0800E9C4000": "1.5.0",
+        "0100A3D008C5C000": "1.5.0", "0100A5C00D162000": "1.5.0", "0100A7C01B792000": "1.5.0",
+        "0100A8E016236000": "1.5.0", "0100AA001415E000": "1.5.0", "0100AA201415C000": "1.5.0",
+        "0100B99019412000": "1.5.0", "0100BF500207C000": "1.5.0", "0100C1F0051B6000": "1.5.0",
+        "0100C3601518C000": "1.5.0", "0100C510166F0000": "1.5.0", "0100C9C00E25C000": "1.5.0",
+        "0100CAA026246000": "1.5.0", "0100CD701434C000": "1.5.0", "0100D440269E8000": "1.5.0",
+        "0100D4900E82C000": "1.5.0", "0100D5501857E000": "1.5.0", "0100D71004694000": "1.5.0",
+        "0100D800117F4000": "1.5.0", "0100DBF01000A000": "1.5.0", "0100EB100AB42000": "1.5.0",
+        "0100F28011892000": "1.5.0", "0100F2C0115B6000": "1.5.0", "0100F43008C44000": "1.5.0",
+        "040015100B514001": "1.5.0", "040032B023CA4000": "1.5.0", "040041E0212AE000": "1.5.0",
+        "0400569027BF4000": "1.5.0", "040057C02159A000": "1.5.0", "040077201BE50000": "1.5.0",
+        "04007EF01F8AE000": "1.5.0", "0400921025B32000": "1.5.0", "0400D4201C6EA000": "1.5.0",
         // 1.4.0 (16 titles)
         "010012101468C000": "1.4.0", "010014C011146000": "1.4.0", "010019A01E2F2000": "1.4.0",
         "01002B00111A2000": "1.4.0", "0100429011144000": "1.4.0", "010055D009F78000": "1.4.0",
@@ -159,58 +187,29 @@ package enum GameUpdateCatalog {
             )
         }
 
-        let fm = FileManager.default
-        let resolvedOutDir = resolveOutputDirectory(outDir: outDir, macAppPath: macAppPath)
-        let workDir = resolvedOutDir.isEmpty ? "" : (resolvedOutDir + "/" + tid + "_build")
-
-        let inspection = BuildSeedCache.inspect(titleID: tid, seedRoot: seedRoot, repoPath: repoPath, fm: fm)
-        let effectiveSeedPath: BuildSeedCache.RefreshPath?
-        if inspection.isUsable {
-            effectiveSeedPath = inspection.path ?? .pathB
-        } else {
-            effectiveSeedPath = inspectAdoptableLegacyWorkDir(
-                workDir: workDir, macAppPath: macAppPath, repoPath: repoPath, fm: fm
-            )
-        }
-
-        let candidates = BuildSeedCache.prefillCandidates(
+        let plan = RefreshPrecheck.evaluate(
             titleID: tid,
-            outDir: resolvedOutDir,
-            gameName: gameName,
+            hasMacBuild: hasMacBuild,
             macAppPath: macAppPath,
-            workDir: workDir.isEmpty ? nil : workDir,
-            fm: fm
+            hasIOSBuild: hasIOSBuild,
+            hasReadableSourceInputs: hasReadableSourceInputs,
+            outDir: outDir,
+            gameName: gameName,
+            seedRoot: seedRoot,
+            repoPath: repoPath
         )
 
-        let canFastRefreshMac: Bool
-        let canFastRefreshIOS: Bool
-        let needsMissingImgGuideIOS: Bool
+        let canFastRefreshMac = hasMacBuild && plan.canFastRefreshMac
+        let canFastRefreshIOS = hasIOSBuild && plan.canFastRefreshIOS
+        let canSeedRefreshMac = hasMacBuild && plan.canSeedRefreshMac
+        let canSeedRefreshIOS = hasIOSBuild && plan.canSeedRefreshIOS
+        let needsShaderRebuildMac = hasMacBuild && plan.needsShaderRebuildMac
+        let needsShaderRebuildIOS = hasIOSBuild && plan.needsShaderRebuildIOS
+        let needsMissingImgGuideIOS = hasIOSBuild && plan.needsMissingImgGuideIOS
 
-        switch effectiveSeedPath {
-        case .none:
-            canFastRefreshMac = false
-            canFastRefreshIOS = false
-            needsMissingImgGuideIOS = false
-        case .some(.pathA):
-            let macReachable = macAppPath.isEmpty || fm.fileExists(atPath: macAppPath) || !candidates.isEmpty
-            canFastRefreshMac = hasMacBuild && macReachable
-            canFastRefreshIOS = hasIOSBuild
-            needsMissingImgGuideIOS = false
-        case .some(.pathB):
-            let hasLocalIOSImg = candidates.contains { $0.lowercased().hasSuffix(".img") && !$0.contains(".app/") }
-                || (!workDir.isEmpty && RomFSArchive.extractedVersion(in: workDir + "/extract") != nil)
-            let hasSeedMetalSources = fm.fileExists(atPath: inspection.seedDir + "/metal-sources")
-            let hasMacPrefill = !candidates.isEmpty || hasSeedMetalSources
-            let macReachable = macAppPath.isEmpty
-                ? hasMacPrefill
-                : (fm.fileExists(atPath: macAppPath) || candidates.contains { $0.lowercased().hasSuffix(".img") })
-            canFastRefreshMac = hasMacBuild && hasMacPrefill && macReachable
-            canFastRefreshIOS = hasIOSBuild && hasLocalIOSImg
-            needsMissingImgGuideIOS = hasIOSBuild && !hasLocalIOSImg
-        }
-
-        let anyPlatformNeedsFull = (hasMacBuild && !canFastRefreshMac) || (hasIOSBuild && !canFastRefreshIOS)
-        let missingOriginalPackage = anyPlatformNeedsFull && !hasReadableSourceInputs
+        let macNeedsOriginalPkg = hasMacBuild && !canSeedRefreshMac
+        let iosNeedsOriginalPkg = hasIOSBuild && !canSeedRefreshIOS
+        let missingOriginalPackage = (macNeedsOriginalPkg || iosNeedsOriginalPkg) && !hasReadableSourceInputs
         let fastAny = canFastRefreshMac || canFastRefreshIOS
         let heroState: HeroRefreshState = spec.hasSpecific
             ? (fastAny ? .specificFast(version: spec.versionLabel) : .specificFull(version: spec.versionLabel))
@@ -224,74 +223,15 @@ package enum GameUpdateCatalog {
             canFastRefreshIOS: canFastRefreshIOS,
             needsMissingImgGuideIOS: needsMissingImgGuideIOS,
             missingOriginalPackage: missingOriginalPackage,
-            hasUsableSeed: effectiveSeedPath != nil,
-            expectedRomfsIdentity: inspection.record?.romfsIdentity
+            hasUsableSeed: plan.hasUsableSeed,
+            expectedRomfsIdentity: plan.expectedRomfsIdentity,
+            canSeedRefreshMac: canSeedRefreshMac,
+            canSeedRefreshIOS: canSeedRefreshIOS,
+            needsShaderRebuildMac: needsShaderRebuildMac,
+            needsShaderRebuildIOS: needsShaderRebuildIOS,
+            shaderRebuildReasonMac: hasMacBuild ? plan.shaderRebuildReasonMac : nil,
+            shaderRebuildReasonIOS: hasIOSBuild ? plan.shaderRebuildReasonIOS : nil
         )
-    }
-
-    private static func resolveOutputDirectory(outDir: String, macAppPath: String) -> String {
-        if !outDir.isEmpty { return outDir }
-        if !macAppPath.isEmpty {
-            let parent = (macAppPath as NSString).deletingLastPathComponent
-            if !parent.isEmpty && parent != "/" { return parent }
-        }
-        return ""
-    }
-
-    private static func normalizeChain(_ chain: String?) -> String? {
-        guard let chain, !chain.isEmpty else { return nil }
-        let trimmed = chain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty else { return nil }
-        return trimmed.hasPrefix("b-") ? String(trimmed.dropFirst(2)) : trimmed
-    }
-
-    private static func isDirectory(_ path: String, fm: FileManager) -> Bool {
-        guard !path.isEmpty else { return false }
-        var isDir: ObjCBool = false
-        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
-    }
-
-    private static func hasLegacyExeFS(in workDir: String, fm: FileManager) -> Bool {
-        if isDirectory(workDir + "/ExeFS", fm: fm) { return true }
-        let extractDir = workDir + "/extract"
-        guard let entries = try? fm.contentsOfDirectory(atPath: extractDir) else { return false }
-        return entries.contains { entry in
-            (entry.hasPrefix("v") || entry.hasPrefix("patched_v"))
-                && isDirectory(extractDir + "/" + entry + "/ExeFS", fm: fm)
-        }
-    }
-
-    private static func inspectAdoptableLegacyWorkDir(
-        workDir: String,
-        macAppPath: String,
-        repoPath: String,
-        fm: FileManager
-    ) -> BuildSeedCache.RefreshPath? {
-        guard !workDir.isEmpty,
-              isDirectory(workDir, fm: fm),
-              isDirectory(workDir + "/shader", fm: fm),
-              hasLegacyExeFS(in: workDir, fm: fm) else { return nil }
-
-        if isDirectory(workDir + "/shader/ios/vk", fm: fm) || isDirectory(workDir + "/shader/ios/gl", fm: fm) {
-            return .pathA
-        }
-        guard let normRepoChain = normalizeChain(EngineLayout.shaderChain(repo: repoPath)) else {
-            return .pathB
-        }
-        let chainTag = "b-" + normRepoChain
-        for base in [workDir + "/shader/ios/" + chainTag, workDir + "/shader/cache/" + chainTag] {
-            if fm.fileExists(atPath: base) || fm.fileExists(atPath: base + ".img") { return .pathA }
-        }
-        if !macAppPath.isEmpty {
-            if fm.fileExists(atPath: macAppPath + "/Contents/Resources/msl/" + chainTag + ".img") {
-                return .pathA
-            }
-            if let bundle = try? MacGameBundle.read(URL(fileURLWithPath: macAppPath)),
-               normalizeChain(bundle.shaderChain) == normRepoChain {
-                return .pathA
-            }
-        }
-        return .pathB
     }
 }
 

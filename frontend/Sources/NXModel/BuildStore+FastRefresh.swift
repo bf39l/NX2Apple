@@ -18,7 +18,8 @@ extension BuildStore {
         outDir: String? = nil,
         gameName: String? = nil,
         existingMacAppPath: String? = nil,
-        externalImgPath: String? = nil
+        externalImgPath: String? = nil,
+        cheatsDir: String? = nil
     ) {
         startFastRefresh(
             titleID: titleID,
@@ -26,7 +27,8 @@ extension BuildStore {
             outDir: outDir,
             gameName: gameName,
             existingMacAppPath: existingMacAppPath,
-            externalImgPath: externalImgPath
+            externalImgPath: externalImgPath,
+            cheatsDir: cheatsDir
         )
     }
 
@@ -43,7 +45,8 @@ extension BuildStore {
             outDir: nil,
             gameName: gameName,
             existingMacAppPath: existingMacAppPath,
-            externalImgPath: nil
+            externalImgPath: nil,
+            cheatsDir: nil
         )
     }
 
@@ -60,7 +63,8 @@ extension BuildStore {
             outDir: nil,
             gameName: gameName,
             existingMacAppPath: existingMacAppPath,
-            externalImgPath: nil
+            externalImgPath: nil,
+            cheatsDir: nil
         )
     }
 
@@ -71,11 +75,18 @@ extension BuildStore {
         outDir: String? = nil,
         gameName: String? = nil,
         existingMacAppPath: String? = nil,
-        externalImgPath: String? = nil
+        externalImgPath: String? = nil,
+        cheatsDir: String? = nil,
+        knownArchivePath: String? = nil,
+        forceShaderRebuildTrailer: Bool = false
     ) {
         guard !running else { return }
         let tid = titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !tid.isEmpty else { return }
+        // Fast refresh is exclusive to nxnative; never run under MacNativeGames or an external builder's Python.
+        if buildUpstream != .nxnative {
+            buildUpstream = .nxnative
+        }
         hintedTitleID = nil
 
         guard repo.isRepo else {
@@ -87,7 +98,7 @@ extension BuildStore {
             return
         }
 
-        let py = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
+        let py = resolveBuildPython()
         let seedRoot = seedCacheRoot
         let trimmedExternalImg = externalImgPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let validExternalImg: String? = (!trimmedExternalImg.isEmpty && FileManager.default.fileExists(atPath: trimmedExternalImg))
@@ -97,6 +108,14 @@ extension BuildStore {
         let resolvedOutDir: String = {
             if let explicit = outDir, !explicit.isEmpty { return explicit }
             if !self.outDir.isEmpty { return self.outDir }
+            if let archive = knownArchivePath, !archive.isEmpty {
+                let archiveDir = archive.lowercased().hasSuffix(".img") ? (archive as NSString).deletingLastPathComponent : archive
+                let parent = (archiveDir as NSString).deletingLastPathComponent
+                if (parent as NSString).lastPathComponent == "games" {
+                    let root = (parent as NSString).deletingLastPathComponent
+                    if !root.isEmpty && root != "/" { return root }
+                }
+            }
             if let app = existingMacAppPath, !app.isEmpty {
                 let parent = (app as NSString).deletingLastPathComponent
                 if !parent.isEmpty && parent != "/" { return parent }
@@ -137,7 +156,10 @@ extension BuildStore {
                     outDir: outDir,
                     gameName: gameName,
                     existingMacAppPath: existingMacAppPath,
-                    externalImgPath: externalImgPath
+                    externalImgPath: externalImgPath,
+                    cheatsDir: cheatsDir,
+                    knownArchivePath: knownArchivePath,
+                    forceShaderRebuildTrailer: forceShaderRebuildTrailer
                 )
             }
             return
@@ -162,6 +184,8 @@ extension BuildStore {
             return
         }
 
+        activeRunStartedAt = Date()
+        activeRunRebuiltShaders = forceShaderRebuildTrailer
         stopping = false
         stoppedByPlayer = false
         archiveGeneration &+= 1
@@ -171,17 +195,38 @@ extension BuildStore {
         done = false
         doneNote = ""
         stages = []
+        resetOverallProgress()
+        seedBuildPlan(fastRefresh: true)
         log.clear()
         staleShadersMessageKey = nil
         failure = nil
         installedOn = ""
         installedAppPath = ""
+        shellUpdatedOnDevice = false
         exportedIPAPath = ""
         if !deferShellPackaging {
             needsReplaceOldImgReminder = false
             updatedImgPath = ""
         }
         send = .idle
+        lastRunWasFastRefresh = true
+        installRecovery.lastFastRefresh = FastRefreshRequest(
+            titleID: tid,
+            targetName: targetName,
+            outDir: outDir,
+            gameName: gameName,
+            existingMacAppPath: existingMacAppPath,
+            externalImgPath: externalImgPath,
+            cheatsDir: cheatsDir,
+            knownArchivePath: knownArchivePath,
+            forceShaderRebuildTrailer: forceShaderRebuildTrailer
+        )
+        activeBuildUpstream = .nxnative
+        mngRun = false
+        s2armRun = false
+        s2armEventsPath = ""
+        nxkitRun = false
+        nxkitFeedback = nil
 
         if let message = preflightSpaceProblem() {
             doneNote = message
@@ -201,18 +246,29 @@ extension BuildStore {
             "--progress", "json"
         ]
 
+        let nxnativeExistingApp: String = {
+            let candidate = existingMacAppPath ?? macAppPath
+            guard !candidate.isEmpty,
+                  let bundle = try? MacGameBundle.read(URL(fileURLWithPath: candidate)),
+                  bundle.upstream == .nxnative else { return "" }
+            return candidate
+        }()
         let macOutput = isMac
-            ? MacAppOutput(workDir: URL(fileURLWithPath: workDir), key: tid, titleID: tid, preferred: existingMacAppPath ?? macAppPath)
+            ? MacAppOutput(workDir: URL(fileURLWithPath: workDir), key: tid, titleID: tid, upstream: .nxnative, preferred: nxnativeExistingApp)
             : nil
         oneGameIPAPath = ""
 
         var tempEnvURL: URL?
         if exportsOneGame {
-            oneGameIPAPath = OneGameIPA.path(folder: resolvedOutDir, titleID: tid)
+            oneGameIPAPath = OneGameIPA.path(folder: resolvedOutDir, titleID: tid, upstream: .nxnative)
             args += OneGameIPA.arguments(ipa: oneGameIPAPath)
         } else if isMac, let macOutput {
             macAppPath = ""
             args += ["--platform", "mac-app", "-o", macOutput.builderURL.path]
+            if shouldPassSeenShaders(forTitleID: tid) {
+                args += ["--seen-shaders"]
+                say(t("msg.seenShadersOn"))
+            }
             if RepoLayout.supportsFallbackIcon(repo.path) { args += macFallbackIconArguments(tid) }
 
             var romfsCandidates: [String] = []
@@ -222,7 +278,8 @@ extension BuildStore {
                 seenRomfs.insert(path)
                 romfsCandidates.append(path)
             }
-            if let existingApp = existingMacAppPath ?? (FileManager.default.fileExists(atPath: macOutput.builderURL.path) ? macOutput.builderURL.path : nil) {
+            let prefillApp = !nxnativeExistingApp.isEmpty ? nxnativeExistingApp : (FileManager.default.fileExists(atPath: macOutput.builderURL.path) ? macOutput.builderURL.path : nil)
+            if let existingApp = prefillApp {
                 addRomfs(existingApp + "/Contents/Resources/romfs.img")
             }
             for img in RomFSArchive.reusableImages(root: resolvedOutDir, key: tid) {
@@ -243,10 +300,30 @@ extension BuildStore {
             if bcOnCPU { say(t("msg.bcOn")) }
             args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
         }
+        if !isMac, RepoLayout.supportsCheatDir(repo.path),
+           let activeCheatsDir = RepoLayout.existingCheatsDir(titleID: tid, explicit: cheatsDir, home: self.home) {
+            args += ["--cheat-dir", activeCheatsDir]
+        }
+        if !isMac, shouldPassIOSSeenShaders(forTitleID: tid, requested: queuedIOSSeenShaders) {
+            args += ["--seen-shaders"]
+            say(t("msg.iosSeenShadersOn"))
+        }
 
         let repoPath = repo.path
-        let prefillMacAppPath = existingMacAppPath ?? macAppPath
+        let prefillMacAppPath = nxnativeExistingApp.isEmpty ? nil : nxnativeExistingApp
         let initialInspection = BuildSeedCache.inspect(titleID: tid, seedRoot: seedRoot, repoPath: repoPath)
+        let initialPrecheck = RefreshPrecheck.evaluate(
+            titleID: tid,
+            hasMacBuild: isMac,
+            macAppPath: nxnativeExistingApp,
+            hasIOSBuild: !isMac,
+            hasReadableSourceInputs: false,
+            outDir: resolvedOutDir,
+            gameName: gameName,
+            seedRoot: seedRoot,
+            repoPath: repoPath,
+            externalIOSImgPath: validExternalImg
+        )
         let adoptTool = engine + "/" + RepoLayout.buildSeedTool
         let needsAdopt = !initialInspection.isUsable
             && FileManager.default.fileExists(atPath: adoptTool)
@@ -259,13 +336,14 @@ extension BuildStore {
                 outDir: resolvedOutDir,
                 gameName: gameName,
                 macAppPath: prefillMacAppPath,
-                workDir: workDir
+                workDir: workDir,
+                archivePath: knownArchivePath
             )
         let driveFolder = devices.driveFolder
         let needsDriveScan = !isMac
             && validExternalImg == nil
             && syncCandidates.isEmpty
-            && initialInspection.path == .pathB
+            && initialPrecheck.needsShaderRebuildIOS
             && !driveFolder.isEmpty
 
         if needsAdopt || needsDriveScan {
@@ -282,15 +360,16 @@ extension BuildStore {
                 var inspection = initialInspection
                 if needsAdopt {
                     var adoptArgs = [adoptTool, "adopt", "--seed-cache-dir", seedRoot, "--title-id", tid, "--work-dir", workDir]
-                    if let app = existingMacAppPath, FileManager.default.fileExists(atPath: app) {
-                        adoptArgs += ["--app-path", app]
+                    if !nxnativeExistingApp.isEmpty, FileManager.default.fileExists(atPath: nxnativeExistingApp) {
+                        adoptArgs += ["--app-path", nxnativeExistingApp]
                     }
                     let adoptCandidates = BuildSeedCache.prefillCandidates(
                         titleID: tid,
                         outDir: resolvedOutDir,
                         gameName: gameName,
-                        macAppPath: existingMacAppPath,
-                        workDir: workDir
+                        macAppPath: prefillMacAppPath,
+                        workDir: workDir,
+                        archivePath: knownArchivePath
                     )
                     let imgCandidate = adoptCandidates.first { $0.hasSuffix(".img") && !$0.contains(".app") }
                         ?? validExternalImg
@@ -308,15 +387,31 @@ extension BuildStore {
                         outDir: resolvedOutDir,
                         gameName: gameName,
                         macAppPath: prefillMacAppPath,
-                        workDir: workDir
+                        workDir: workDir,
+                        archivePath: knownArchivePath
                     )
                     : syncCandidates
+
+                let currentPrecheck = needsAdopt
+                    ? RefreshPrecheck.evaluate(
+                        titleID: tid,
+                        hasMacBuild: isMac,
+                        macAppPath: nxnativeExistingApp,
+                        hasIOSBuild: !isMac,
+                        hasReadableSourceInputs: false,
+                        outDir: resolvedOutDir,
+                        gameName: gameName,
+                        seedRoot: seedRoot,
+                        repoPath: repoPath,
+                        externalIOSImgPath: validExternalImg
+                    )
+                    : initialPrecheck
 
                 var matchedDriveImg: String?
                 if !isMac,
                    validExternalImg == nil,
                    finalCandidates.isEmpty,
-                   inspection.path == .pathB,
+                   currentPrecheck.needsShaderRebuildIOS,
                    !driveFolder.isEmpty {
                     matchedDriveImg = RomfsImageIdentity.scanExternalDriveForMatchingImage(
                         driveFolder: driveFolder,
@@ -447,15 +542,35 @@ extension BuildStore {
                         let fw = ShellInstall.builtFramework(workDir: self.effectiveWorkDir)
                             ?? ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: key)
                         let outTID = ShellInstall.titleID(ofFramework: fw)
-                        self.packArchive(workDir: self.effectiveWorkDir, titleID: outTID, isFastRefresh: true) { archive in
+                        self.packArchiveWithOutcome(workDir: self.effectiveWorkDir, titleID: outTID, isFastRefresh: true) { outcome in
                             if self.deferShellPackaging {
-                                self.deferShellPackage(framework: fw, titleID: outTID, name: name, archive: archive)
+                                self.deferShellPackage(
+                                    framework: fw, titleID: outTID, name: name, archive: outcome.archiveDir,
+                                    didUpdateImg: outcome.didUpdateImg, updatedImgPath: outcome.primaryImgPath
+                                )
                             } else if self.exportsFramework {
+                                let exportNote = self.t("refreshDone.exportManualReason")
+                                self.needsReplaceOldImgReminder = outcome.didUpdateImg
+                                self.updatedImgPath = outcome.didUpdateImg ? outcome.primaryImgPath : ""
+                                let imgStatus: QueueEntryImgStatus = outcome.didUpdateImg
+                                    ? .manualReplace(imgPath: outcome.primaryImgPath, reason: exportNote)
+                                    : .unchanged
+                                self.queue?.updateImgStatus(entryID: self.activeQueuedEntryID, titleID: outTID, imgStatus: imgStatus)
                                 self.exportFrameworkBundle(framework: fw, titleID: outTID, name: name)
                             } else if self.exportsShell {
+                                let exportNote = self.t("refreshDone.exportManualReason")
+                                self.needsReplaceOldImgReminder = outcome.didUpdateImg
+                                self.updatedImgPath = outcome.didUpdateImg ? outcome.primaryImgPath : ""
+                                let imgStatus: QueueEntryImgStatus = outcome.didUpdateImg
+                                    ? .manualReplace(imgPath: outcome.primaryImgPath, reason: exportNote)
+                                    : .unchanged
+                                self.queue?.updateImgStatus(entryID: self.activeQueuedEntryID, titleID: outTID, imgStatus: imgStatus)
                                 self.exportShell(framework: fw, titleID: outTID, name: name)
                             } else {
-                                self.installShell(framework: fw, titleID: outTID, name: name, archive: archive)
+                                self.installShell(
+                                    framework: fw, titleID: outTID, name: name, archive: outcome.archiveDir,
+                                    didUpdateImg: outcome.didUpdateImg, updatedImgPath: outcome.primaryImgPath
+                                )
                             }
                         }
                         self.clearFastRefreshContext()

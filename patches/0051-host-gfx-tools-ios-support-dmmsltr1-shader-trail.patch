@@ -29,13 +29,13 @@ Issue: LNPANDY/NX2Apple
  dm/tools/romfs.py                    |  69 +++-
  dm/tools/romfs_image.py              | 577 ++++++++++++++++++++++++++-
  dm/tools/tests/test_msl_trailer.py   | 491 +++++++++++++++++++++++
- 17 files changed, 1899 insertions(+), 111 deletions(-)
+ 17 files changed, 1901 insertions(+), 109 deletions(-)
  create mode 100644 dm/gfx/msl_mount.h
  create mode 100644 dm/gfx/nvn/msl_mount.c
  create mode 100644 dm/tools/tests/test_msl_trailer.py
 
 diff --git a/dm/gfx/gl/hle_gl.m b/dm/gfx/gl/hle_gl.m
-index fa233e0..51561dc 100644
+index 6f6f940..4b36ddb 100644
 --- a/dm/gfx/gl/hle_gl.m
 +++ b/dm/gfx/gl/hle_gl.m
 @@ -27,8 +27,11 @@
@@ -58,7 +58,7 @@ index fa233e0..51561dc 100644
  
  int mtl_fps_target(void);
  int mtl_link_active(void); int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // nvn_mtl.m
-@@ -174,14 +178,12 @@ typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;
+@@ -179,14 +183,12 @@ typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;
  typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
  static shinfo *g_sh; static int g_nsh;
  static int sh_cmp(const void *a, const void *b) { int c = memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); return c ? c : ((const shinfo *)a)->frag - ((const shinfo *)b)->frag; }
@@ -77,7 +77,7 @@ index fa233e0..51561dc 100644
      if (!key || !stage || strlen(key) != 16 || (strcmp(stage, "vert") && strcmp(stage, "frag"))) return 0;
      *s = (shinfo){.frag = !strcmp(stage, "frag"), .ub_slot = -1, .arg_slot = -1, .nargs = -1};
      memcpy(s->key, key, 16);
-@@ -191,10 +193,10 @@ static int sh_read_row(char *line, shinfo *s) {
+@@ -196,10 +198,10 @@ static int sh_read_row(char *line, shinfo *s) {
      }
      int na = 0, nu = 0, nt = 0, nb = 0;
      for (const char *c = res; *c; c++) if (c == res || c[-1] == ' ') { na += *c == 'a'; nu += *c == 'u'; nt += *c == 't'; nb += *c == 'n'; }
@@ -90,7 +90,7 @@ index fa233e0..51561dc 100644
          char nm[64], ty[32]; unsigned a1, a2, a3; int sa;
          if (t[0] == 'a' && (unsigned)s->na < (unsigned)na && sscanf(t, "a:%63[^=]=%u:%31s", nm, &a1, ty) == 3 && a1 < 16) {
              shattr *x = &s->a[s->na++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty);
-@@ -222,29 +224,67 @@ static id<MTLLibrary> sh_library(const char *path) {
+@@ -231,29 +233,67 @@ static id<MTLLibrary> sh_library(const char *path) {
  static id<MTLFunction> sh_function(id<MTLLibrary> lib, const shinfo *s) {
      return [lib newFunctionWithName:[NSString stringWithFormat:@"gl_%s_%c", s->key, s->frag ? 'f' : 'v']];
  }
@@ -176,7 +176,7 @@ index fa233e0..51561dc 100644
  }
  static const shinfo *sh_find(const char *key, int frag) { shinfo k; memcpy(k.key, key, 16); k.frag = frag; return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
  
-@@ -3419,7 +3459,7 @@ EGL(eglGetProcAddress, void *, const char *name) {
+@@ -3904,7 +3944,7 @@ EGL(eglGetProcAddress, void *, const char *name) {
  }
  
  void dm_gl_teardown(void) { @autoreleasepool {
@@ -185,13 +185,13 @@ index fa233e0..51561dc 100644
      dm_gl_drain();
      pass_end();
      g_cb = nil;
-@@ -3493,6 +3533,7 @@ void dm_gl_teardown(void) { @autoreleasepool {
+@@ -3984,6 +4024,7 @@ void dm_gl_teardown(void) { @autoreleasepool {
      g_frames = 0;
  
-     g_lib = nil; g_util = nil;
+     g_lib = nil; g_util = nil; g_read_bc_pso = nil;
 +    dm_msl_trailer_teardown();
      g_samp0 = nil;
-     g_tex0 = nil; g_cube0 = nil; g_tex3d0 = nil; g_arr0 = nil;
+     g_tex0 = nil; g_cube0 = nil; g_tex3d0 = nil; g_arr0 = nil; g_uint0 = nil; g_tbuf0 = nil;
      g_ev = nil; g_q = nil; g_dev = nil;
 diff --git a/dm/gfx/msl_mount.h b/dm/gfx/msl_mount.h
 new file mode 100644
@@ -494,18 +494,18 @@ index 0000000..4167f1c
 +    pthread_mutex_unlock(&g_msl_tr_mu);
 +}
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 0a5a757..97396a8 100644
+index 9946489..d6753d4 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -42,6 +42,7 @@
- #include "nvn_link_latch.h"
+@@ -44,6 +44,7 @@
+ #include "nvn_present_history.h"
  #include "nvn_timestamp.h"
  #include "msl_image.h"
 +#include "../msl_mount.h"
  #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
  #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
  // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
-@@ -6751,16 +6752,26 @@ static const img_ent *msl_image_file(NSString *path, romfs_img **img) {
+@@ -7961,16 +7962,29 @@ static const img_ent *msl_image_file(NSString *path, romfs_img **img) {
      *img = m;
      return m ? msl_image_find(m, path.lastPathComponent.UTF8String) : NULL;
  }
@@ -517,9 +517,6 @@ index 0a5a757..97396a8 100644
      NSData *d = [NSData dataWithContentsOfFile:path];
      if (d) return d;
      romfs_img *m; const img_ent *x = msl_image_file(path, &m);
--    if (!x) {
--        NSString *live = live_artifact(path.lastPathComponent);
--        return live ? [NSData dataWithContentsOfFile:live] : nil;
 +    if (x) {
 +        NSMutableData *o = [NSMutableData dataWithLength:(NSUInteger)x->b];
 +        if (romfs_image_read(m->fd, o.mutableBytes, (size_t)x->b, (off_t)x->a)) return o;
@@ -529,15 +526,18 @@ index 0a5a757..97396a8 100644
 +    if (rel && dm_msl_trailer_read(rel.UTF8String, &buf, &len)) {
 +        if (!len) { free(buf); return [NSData data]; }
 +        return [NSData dataWithBytesNoCopy:buf length:len freeWhenDone:YES];
++    }
+     if (!x) {
+         NSString *live = live_artifact(path.lastPathComponent);
+         return live ? [NSData dataWithContentsOfFile:live] : nil;
      }
 -    NSMutableData *o = [NSMutableData dataWithLength:(NSUInteger)x->b];
 -    return romfs_image_read(m->fd, o.mutableBytes, (size_t)x->b, (off_t)x->a) ? o : nil;
-+    NSString *live = !x ? live_artifact(path.lastPathComponent) : nil;
-+    return live ? [NSData dataWithContentsOfFile:live] : nil;
++    return nil;
  }
  static NSString *exe_rel(const char *rel) {
      char buf[4096]; uint32_t n = sizeof buf;
-@@ -6796,10 +6807,13 @@ static void shmap_read(void) {
+@@ -8012,10 +8026,13 @@ static void shmap_read(void) {
      g_shmap_path = path;
      const char *m = getenv("DM_MSL_DIR");
      // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
@@ -552,7 +552,7 @@ index 0a5a757..97396a8 100644
          else MLOG("[RED] shader library %s (a folder or a .img file) does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
      }
      // The library's stamp (inputs.tsv, written by a full dmsh_build.py run): the game and the digest of the profile inputs it was built from. The chain version is the same for every
-@@ -7005,7 +7019,7 @@ static id<MTLLibrary> lib_from_map(msl_map f, NSError **err) {
+@@ -8254,10 +8271,13 @@ static id<MTLLibrary> lib_from_map(msl_map f, NSError **err) {
  }
  static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
      int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
@@ -560,19 +560,24 @@ index 0a5a757..97396a8 100644
 +    if (fd < 0) {   // not in the folder: the library's image or DM_ROMFS shader trailer, whose one descriptor is shared, and only this file's pages are mapped
          int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
          if (x && msl_image_map(img, x, &f)) return lib_from_map(f, err);
-         NSString *live = !x ? live_artifact(path.lastPathComponent) : nil;
-@@ -7026,7 +7040,9 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
+-        NSString *live = !x ? live_artifact(path.lastPathComponent) : nil;
++        NSString *rel = msl_trailer_rel(path);
++        if (rel && dm_msl_trailer_map(rel.UTF8String, &f)) return lib_from_map(f, err);
++        int in_trailer = rel && dm_msl_trailer_has(rel.UTF8String);
++        NSString *live = !x && !in_trailer ? live_artifact(path.lastPathComponent) : nil;
+         if (live) {
+             fd = open(live.fileSystemRepresentation, O_RDONLY);
+             if (fd < 0) {
+@@ -8275,7 +8295,7 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
                  }
              }
          }
 -        else if (!x) errno = open_errno;
-+        NSString *rel = msl_trailer_rel(path);
-+        if (rel && dm_msl_trailer_map(rel.UTF8String, &f)) return lib_from_map(f, err);
-+        if (!x && (!rel || !dm_msl_trailer_has(rel.UTF8String))) errno = open_errno;
++        else if (!x && !in_trailer) errno = open_errno;
      }
      if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
      size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); int map_errno = errno; close(fd);
-@@ -11515,8 +11531,13 @@ static int pre_later_take(PreLater *l, int wait) {
+@@ -13214,8 +13234,13 @@ static int pre_later_take(PreLater *l, int wait) {
  // their bases cannot be made yet, so the stamp names one such file (pre_device_stamp) and a later start builds them once it is there. g_pre_nolib_file: the first one seen in this
  // run, a name in the library, under g_pre_fail_lock
  static _Atomic int g_pre_nolib; static NSString *g_pre_nolib_file;
@@ -588,7 +593,7 @@ index 0a5a757..97396a8 100644
  // 1 (and the file noted) when the library lacks <key><suffix>
  static int pre_lib_absent(NSString *key, NSString *suffix) {
      NSString *name = [key stringByAppendingString:suffix];
-@@ -20517,10 +20538,11 @@ void dm_gfx_teardown(void) { @autoreleasepool {
+@@ -23319,10 +23344,11 @@ void dm_gfx_teardown(void) { @autoreleasepool {
  
      romfs_img *mimg = atomic_exchange(&g_msl_img, NULL);
      if (mimg) romfs_image_close(mimg);
@@ -602,12 +607,12 @@ index 0a5a757..97396a8 100644
      g_pso_user_seen = nil; g_progpf_seen = nil; g_hy_kick_set = nil;
      g_pre_known = nil; g_pre_fails = nil; g_pre_nolib_file = nil; g_pre_nolib = 0;
 diff --git a/dm/gfx/tests/t_shmap_warm.m b/dm/gfx/tests/t_shmap_warm.m
-index 5caa8ab..3935568 100644
+index 7f2c552..de1c7f6 100644
 --- a/dm/gfx/tests/t_shmap_warm.m
 +++ b/dm/gfx/tests/t_shmap_warm.m
-@@ -48,6 +48,84 @@ int main(void) { @autoreleasepool {
-     mtl_prepare(); shmap_load();   // later calls: nothing starts twice
+@@ -76,6 +76,84 @@ int main(void) { @autoreleasepool {
      EXPECT_EQ("the prewarm starts once", 1, g_warm_started);
+     EXPECT_EQ("later calls do not freeze again", 1, g_freeze_on[3] == 1 && g_freeze_on[4] == 1);
  
 +    // Embedded DMMSLTR1 shader trailer in DM_ROMFS serves shmap_read / msl_data / msl_has when DM_MSL_DIR lacks the files, while DM_MSL_DIR still wins when present
 +    dm_gfx_teardown();
@@ -825,7 +830,7 @@ index 64b2173..37023b1 100644
      g_ev = nil;
      g_q = nil;
 diff --git a/dm/host/hle_lifecycle.c b/dm/host/hle_lifecycle.c
-index 902d2b9..097687c 100644
+index ac936bd..ebc4697 100644
 --- a/dm/host/hle_lifecycle.c
 +++ b/dm/host/hle_lifecycle.c
 @@ -98,6 +98,7 @@ __attribute__((weak)) void dm_codec_video_teardown_post(void) {}
@@ -836,7 +841,7 @@ index 902d2b9..097687c 100644
  __attribute__((weak)) void dm_fs_teardown(void) {}
  __attribute__((weak)) void dm_ue_malloc_teardown(void) {}
  __attribute__((weak)) void dm_guest_clock_wake_teardown(void) {}
-@@ -138,6 +139,7 @@ void dm_host_teardown_for_shell(void) {
+@@ -139,6 +140,7 @@ void dm_host_teardown_for_shell(void) {
      dm_sdk16_teardown();
      dm_hid_touch_teardown();
      dm_fpslock_teardown();
@@ -1045,10 +1050,10 @@ index 687b41c..8c9853e 100644
      }
  }
 diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
-index a654738..94b7692 100644
+index a160703..3fd4e5d 100644
 --- a/dm/host/tests/t_fs.c
 +++ b/dm/host/tests/t_fs.c
-@@ -297,6 +297,82 @@ int main(void) {
+@@ -318,6 +318,82 @@ int main(void) {
          }
          f = fopen(ip, "wb"); fwrite(img, 1, 39 + 50, f); fclose(f);   // cut off inside the index, as a copy stopped partway
          CHECK(!img_open(ip), "a cut-off image is refused");
@@ -1215,21 +1220,21 @@ index 4792b5e..54671a3 100644
          """Slim builds carry no add-on content: games/<id>/aoc (the layout hle_fs.c aoc_dir reads) must reach DM_AOC_DIR, before aoc_locate takes Documents/aoc or <App>/aoc, and never over an explicit value."""
          main = (REPO / 'dm/ios/Sources/main.m').read_text()
 diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
-index d93e083..4c06244 100755
+index dace92a..a7e3cc5 100755
 --- a/dm/ios/tools/build_ipa.sh
 +++ b/dm/ios/tools/build_ipa.sh
-@@ -250,10 +250,11 @@ if [ "$FRAMEWORK" = 1 ]; then
+@@ -251,10 +251,11 @@ if [ "$FRAMEWORK" = 1 ]; then
    fi
    NRO_TABLE=$PATCHED/nro.tsv; [ -f "$NRO_TABLE" ] || NRO_TABLE=   # the NRO modules gen_embed.py packs: nro_count in the manifest
    FW_LOADER=FR; [ -z "$FRAMEWORK_ONLY" ] || FW_LOADER=FH
-+  FW_GFXAPI=${GFXAPI:-$(python3 "$DM/games/game.py" "$GAME" gfx_api nvn)} || die "game profile: gfx_api"
-   python3 tools/gen_manifest.py Gen/framework/game.manifest.json --game "$GAME" --name "$DM_DISPLAY_NAME" \
++  FW_GFXAPI=${GFXAPI:-$("${DM_PYTHON:-python3}" "$DM/games/game.py" "$GAME" gfx_api nvn)} || die "game profile: gfx_api"
+   "${DM_PYTHON:-python3}" tools/gen_manifest.py Gen/framework/game.manifest.json --game "$GAME" --name "$DM_DISPLAY_NAME" \
      --display-version "$DM_APP_VERSION" --package-version "${PKG:-}" --modules "$MODS" ${NRO_TABLE:+--nro-table "$NRO_TABLE"} \
 -    --chain "b-$V" --romfs-marker "$MARKER" --romfs-identity "$ROMFS_ID" --framework-name "$FW_NAME" --loader "$FW_LOADER" --profile "$GD/game.tsv" \
 -    --built-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /dev/null || die "game manifest (gen_manifest.py)"
 +    --chain "b-$V" --romfs-marker "$MARKER" --romfs-identity "$ROMFS_ID" --framework-name "$FW_NAME" --loader "$FW_LOADER" \
 +    --gfx-api "$FW_GFXAPI" --built-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --profile "$GD/game.tsv" > /dev/null || die "game manifest (gen_manifest.py)"
-   DM_NS_TAG=$(python3 tools/gen_objc_namespace.py --print-tag ${DM_NS_TAG:+--tag "$DM_NS_TAG"} --game "$GAME" --framework-name "$FW_NAME" ${DM_CHAIN_INDEX:+--chain-index "$DM_CHAIN_INDEX"} \
+   DM_NS_TAG=$("${DM_PYTHON:-python3}" tools/gen_objc_namespace.py --print-tag ${DM_NS_TAG:+--tag "$DM_NS_TAG"} --game "$GAME" --framework-name "$FW_NAME" ${DM_CHAIN_INDEX:+--chain-index "$DM_CHAIN_INDEX"} \
      --header Gen/framework/objc_namespace.h --exports Gen/framework/exported_symbols.txt \
      "$DM/host" "$DM/gfx" "$DM/ios/Sources" "$DM/ios/framework") || die "framework ObjC namespace"
 diff --git a/dm/ios/tools/gen_manifest.py b/dm/ios/tools/gen_manifest.py
@@ -1379,7 +1384,7 @@ index c6f19ac..dc83061 100644
          _fd_ranges[self.fd] = (self.start, self.length)
      def readable(self): return True
 diff --git a/dm/tools/romfs_image.py b/dm/tools/romfs_image.py
-index c06bf0b..769d0b3 100755
+index 32dd622..4823a73 100755
 --- a/dm/tools/romfs_image.py
 +++ b/dm/tools/romfs_image.py
 @@ -14,12 +14,26 @@
@@ -1410,7 +1415,7 @@ index c06bf0b..769d0b3 100755
  GUEST_NAME = 'org.d2rmobile.guest-name'
  # Files a dump tool leaves in every folder of the game's tree, which are not game files: an FTP dump keeps the server's listing as .listing (as the NUP spec's §6.3 says a producer
  # may). Packed, a game that lists a folder sees one more entry: Nintendo Switch Sports Resort cuts each name at its first '.', loaded "Parameter/<folder>/" with an empty name, got
-@@ -175,15 +189,117 @@ def _clean(text):   # one token of the identity line: no spaces, no newlines
+@@ -189,15 +203,117 @@ def _clean(text):   # one token of the identity line: no spaces, no newlines
      return ''.join(c if c.isalnum() or c in '._-+' else '_' for c in str(text)) or '-'
  
  
@@ -1531,7 +1536,7 @@ index c06bf0b..769d0b3 100755
          h, rest = _FNV_OFFSET, b''
          f.seek(ioff)
          def mix(h, data):
-@@ -200,7 +316,416 @@ def identity(img, title='', version='', build=''):
+@@ -214,7 +330,416 @@ def identity(img, title='', version='', build=''):
              rest = chunk[len(chunk) - keep:]; chunk = chunk[:len(chunk) - keep]
              if not left and len(chunk) % 8: chunk += b'\0' * (8 - len(chunk) % 8)
              h = mix(h, chunk)
@@ -1949,7 +1954,7 @@ index c06bf0b..769d0b3 100755
  
  
  def parse_identity(text):   # {field: value} of an identity line; size is an int
-@@ -216,15 +741,49 @@ def same_identity(a, b):   # two lines name the same image when size and index a
+@@ -230,15 +755,49 @@ def same_identity(a, b):   # two lines name the same image when size and index a
      return (x['size'], x['index']) == (y['size'], y['index'])
  
  

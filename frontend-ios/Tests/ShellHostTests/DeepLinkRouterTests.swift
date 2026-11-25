@@ -84,14 +84,14 @@ private final class LockedBox<Value>: @unchecked Sendable {
     }
 
     private func makeModel(box: FrameworkBox, hotRoot: URL? = nil, harness: DeepLinkHarness = DeepLinkHarness(),
-                           launcher: DeepLinkRecordingLauncher = DeepLinkRecordingLauncher(),
-                           suitePrefix: String = "deeplink.tests.\(UUID().uuidString).") -> ShellHostModel {
+                           launcher: DeepLinkRecordingLauncher = DeepLinkRecordingLauncher()) -> ShellHostModel {
+        let defaultsProvider = TestDefaults.keyed("deeplink")
         let config = ShellHostConfig(
             gamesRoot: box.frameworks,
             appDataRoot: box.documents.appendingPathComponent("games", isDirectory: true),
             hotFrameworksRoot: hotRoot,
             environment: HostEnvironment(chain: "b-3f9a2c"),
-            defaults: { UserDefaults(suiteName: suitePrefix + $0)! },
+            defaults: defaultsProvider,
             openURL: { harness.openedURLs.append($0) },
             copyToPasteboard: { harness.copiedStrings.append($0) },
             saveImageToPhotos: { data in
@@ -102,7 +102,7 @@ private final class LockedBox<Value>: @unchecked Sendable {
             activeRunningGameID: { harness.activeGameID },
             requestStopRunningGame: { harness.stopRequestCount += 1 }
         )
-        let shell = ShellSettingsStore(defaults: UserDefaults(suiteName: suitePrefix + "shell")!)
+        let shell = ShellSettingsStore(defaults: defaultsProvider("shell"))
         return ShellHostModel(config: config, launcher: launcher, shellSettings: shell)
     }
 
@@ -523,13 +523,11 @@ private final class LockedBox<Value>: @unchecked Sendable {
         let bgCompletionQueue = DispatchQueue(label: "test.photokit.completion")
         let recorded = LockedBox<[Data]>([])
         let ranOffMain = LockedBox<Bool>(false)
-        let suitePrefix = "shortcut.bg.\(UUID().uuidString)."
-
         let harness = DeepLinkHarness()
         let cfg = ShellHostConfig(
             gamesRoot: box.frameworks,
             appDataRoot: box.documents.appendingPathComponent("games", isDirectory: true),
-            defaults: { UserDefaults(suiteName: suitePrefix + $0)! },
+            defaults: TestDefaults.keyed("shortcut-bg"),
             openURL: { harness.openedURLs.append($0) },
             copyToPasteboard: { harness.copiedStrings.append($0) },
             saveImageToPhotos: { pngData in
@@ -596,8 +594,7 @@ private final class LockedBox<Value>: @unchecked Sendable {
             in: box.frameworks, folder: "DmGame\(secondTitleID).framework", titleID: secondTitleID,
             title: "Alpha Fixture", bundleID: "org.nxnative.alpha", box: box
         )
-        let suitePrefix = "shortcut.catalog.\(UUID().uuidString)."
-        let defaultsFn: @Sendable (String) -> UserDefaults = { UserDefaults(suiteName: suitePrefix + $0)! }
+        let defaultsFn = TestDefaults.keyed("shortcut-catalog")
 
         let all = HomeScreenShortcutSupport.availableGames(
             gamesRoot: box.frameworks,
@@ -713,6 +710,49 @@ private final class LockedBox<Value>: @unchecked Sendable {
         let cgImage = try #require(HomeScreenGuideCardRenderer.renderCGImage(stepper: stepper, iconPNG: iconPNG, hintText: hint))
         #expect(cgImage.width == 960)
         #expect(cgImage.height == 540)
+
+        let veryLongHint = String(repeating: "Touchez retour ou avancer pour changer d’étape ", count: 6)
+        let truncatedPB = try #require(HomeScreenGuideCardRenderer.renderPixelBuffer(stepper: stepper, iconPNG: iconPNG, hintText: veryLongHint))
+        let emptyHintPB = try #require(HomeScreenGuideCardRenderer.renderPixelBuffer(stepper: stepper, iconPNG: iconPNG, hintText: ""))
+        #expect(CVPixelBufferGetWidth(truncatedPB) == 960)
+        #expect(CVPixelBufferGetHeight(truncatedPB) == 540)
+
+        // Compare hint band outside horizontal margins (x < 36 and x > 924) against the empty-hint baseline:
+        // truncated hint text must never bleed outside the card margins.
+        let truncatedBytes = pixelBufferBytes(truncatedPB)
+        let baselineBytes = pixelBufferBytes(emptyHintPB)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(truncatedPB)
+        let hintBandYRange = (540 - 72)..<(540 - 30)
+        var marginOverflowPixels = 0
+        var insideHintDiffPixels = 0
+        for y in hintBandYRange {
+            for x in 0..<960 {
+                let offset = y * bytesPerRow + x * 4
+                let dr = abs(Int(truncatedBytes[offset + 2]) - Int(baselineBytes[offset + 2]))
+                let dg = abs(Int(truncatedBytes[offset + 1]) - Int(baselineBytes[offset + 1]))
+                let db = abs(Int(truncatedBytes[offset]) - Int(baselineBytes[offset]))
+                let changed = max(dr, max(dg, db)) > 12
+                if changed {
+                    if x < 36 || x > 924 {
+                        marginOverflowPixels += 1
+                    } else {
+                        insideHintDiffPixels += 1
+                    }
+                }
+            }
+        }
+        #expect(insideHintDiffPixels > 0, "hint text must actually draw inside the horizontal margins")
+        #expect(marginOverflowPixels == 0, "truncated hint text must not overflow outside card margins")
+
+        // Narrowest supported canvas (64x64) and empty hint text must render safely without crashing or negative rects.
+        let narrowImage = try #require(
+            HomeScreenGuideCardRenderer.renderCGImage(stepper: stepper, iconPNG: nil, hintText: veryLongHint, size: CGSize(width: 64, height: 64))
+        )
+        #expect(narrowImage.width == 64)
+        #expect(narrowImage.height == 64)
+        let emptyImage = try #require(HomeScreenGuideCardRenderer.renderCGImage(stepper: stepper, iconPNG: nil, hintText: ""))
+        #expect(emptyImage.width == 960)
+        #expect(emptyImage.height == 540)
     }
 
     @Test func homeScreenGuidePiPToggleAndLifecycleRespectsUserChoice() async throws {

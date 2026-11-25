@@ -44,14 +44,24 @@ import NXCore
     private let busy: () -> Bool
     private let engineChangedReason: () -> String
     private let packageFailureReason: () -> String
+    private var currentUpstream: () -> EngineUpstreamKind
+    private var defaultKeysPath: () -> String
+    private var readPackageTitleID: (String, String) -> String?
+    private var mngTreePath: () -> String = { "" }
 
     package init(file: URL?, engineID: @escaping () -> String, busy: @escaping () -> Bool,
                  start: @escaping (QueueEntry) -> String?, packageBatch: @escaping ([QueueEntry]) -> Bool = { _ in false },
                  engineChangedReason: @escaping () -> String = { "The engine changed since this game was queued" },
-                 packageFailureReason: @escaping () -> String = { L10n.string("queue.cannotPackage", .en) }) {
+                 packageFailureReason: @escaping () -> String = { L10n.string("queue.cannotPackage", .en) },
+                 currentUpstream: @escaping () -> EngineUpstreamKind = { .nxnative },
+                 defaultKeysPath: @escaping () -> String = { "" },
+                 readPackageTitleID: @escaping (String, String) -> String? = { PackageHeaderTitleID.readHex16(path: $0, keysPath: $1) }) {
         self.file = file; self.engineID = engineID; self.busy = busy; self.start = start; self.packageBatch = packageBatch
         self.engineChangedReason = engineChangedReason
         self.packageFailureReason = packageFailureReason
+        self.currentUpstream = currentUpstream
+        self.defaultKeysPath = defaultKeysPath
+        self.readPackageTitleID = readPackageTitleID
         let stored = file.map(BuildQueueFile.load) ?? (entries: [QueueEntry](), paused: false)
         var loaded = stored.entries
         for index in loaded.indices { loaded[index].target = BuildTarget.normalized(loaded[index].target) }
@@ -97,15 +107,79 @@ import NXCore
             (entry.status != .done || group.allSatisfy { $0.status == .done && $0.packagePending == nil })
     }
 
+    /// Wires the active build upstream and package header title ID reader when attached to `BuildStore`.
+    package func bindUpstreamProvider(
+        currentUpstream: @escaping () -> EngineUpstreamKind,
+        defaultKeysPath: @escaping () -> String,
+        readPackageTitleID: @escaping (String, String) -> String?,
+        mngTreePath: @escaping () -> String = { "" }
+    ) {
+        self.currentUpstream = currentUpstream
+        self.defaultKeysPath = defaultKeysPath
+        self.readPackageTitleID = readPackageTitleID
+        self.mngTreePath = mngTreePath
+    }
+
+    private func resolvedEntryUpstream(for entry: QueueEntry, batchUpstream: EngineUpstreamKind) -> EngineUpstreamKind {
+        if entry.fastRefresh { return .nxnative }
+        let desired = entry.upstream ?? batchUpstream
+        switch desired {
+        case .macNativeGames:
+            let isMac = BuildTarget.normalized(entry.target) == BuildTarget.mac
+            let supported = MacNativeGamesBuilder.supportsInput(
+                titleID: entry.titleID,
+                gameFolder: entry.gameFolder,
+                basePath: entry.inputs["base"]?.first,
+                tree: mngTreePath()
+            )
+            return (isMac && supported) ? .macNativeGames : .nxnative
+        case .kidWithSword:
+            return EngineUpstreamKind.kidWithSword.supportsTitleID(entry.titleID) ? .kidWithSword : .nxnative
+        case .noLagKart:
+            let isMac = BuildTarget.normalized(entry.target) == BuildTarget.mac
+            return (isMac && EngineUpstreamKind.noLagKart.supportsTitleID(entry.titleID)) ? .noLagKart : .nxnative
+        case .nxkit:
+            return BuildTarget.normalized(entry.target) == BuildTarget.mac ? .nxkit : .nxnative
+        case .nxnative, .s2arm:
+            return desired
+        }
+    }
+
     package func enqueue(_ new: [QueueEntry]) {
         guard !new.isEmpty else { return }
+        // Capture active upstream once for the whole batch before publishing entries,
+        // so adding a mixed batch does not downgrade later eligible MNG entries mid-loop.
+        let batchUpstream = currentUpstream()
+        let fallbackKeys = defaultKeysPath()
         for var entry in new {
             entry.target = BuildTarget.normalized(entry.target)
             if macOnly(), entry.target != BuildTarget.mac, !entry.fastRefresh {   // a refresh of an iPhone app stays one: `startQueued` skips it
                 entry.target = BuildTarget.mac
                 entry.packageAfter = false; entry.exportIPA = nil; entry.exportFramework = nil
             }
-            entry.status = .queued; entry.reason = nil
+            entry.status = .queued; entry.reason = nil; entry.imgStatus = nil
+            if MacNativeGamesBuilder.normalizedHex16(entry.titleID) == nil,
+               !entry.fastRefresh,
+               let base = entry.inputs["base"]?.first,
+               !base.isEmpty {
+                if let parsed = TitleID.parse(base) {
+                    entry.titleID = String(format: "%016llX", parsed)
+                } else {
+                    let entryKeys = entry.inputs["keys"]?.first ?? ""
+                    let effectiveKeys = entryKeys.isEmpty ? fallbackKeys : entryKeys
+                    if !effectiveKeys.isEmpty, let headerID = readPackageTitleID(base, effectiveKeys),
+                       let normalized = MacNativeGamesBuilder.normalizedHex16(headerID) {
+                        entry.titleID = normalized
+                    }
+                }
+            }
+            entry.upstream = resolvedEntryUpstream(for: entry, batchUpstream: batchUpstream)
+            if entry.target != BuildTarget.mac && entry.upstream?.buildsIOSStandaloneOnly == true {
+                entry.packageAfter = false
+                entry.exportIPA = true
+                entry.exportFramework = false
+                entry.destinationName = nil
+            }
             let key = QueueKey(titleID: entry.titleID, target: entry.target)
             let group = entries.filter { QueueKey(titleID: $0.titleID, target: $0.target).titleID == key.titleID }
             if let index = entries.firstIndex(where: { QueueKey(titleID: $0.titleID, target: $0.target) == key }) {
@@ -121,6 +195,7 @@ import NXCore
                 entries.append(entry)
             }
         }
+        if running == nil && busy() && !paused && !awaitingResume && hasWaiting { active = true }
         persist()
         if active { processNext() }
     }
@@ -172,7 +247,7 @@ import NXCore
         guard let group = games.first(where: { $0.id == id }), group.retryable else { return }
         let ids = Set(group.entries.filter { $0.status == .failed || $0.status == .skipped || $0.status == .stopped }.map(\.id))
         for index in entries.indices where ids.contains(entries[index].id) {
-            entries[index].status = .queued; entries[index].reason = nil
+            entries[index].status = .queued; entries[index].reason = nil; entries[index].imgStatus = nil
             entries[index].engineID = engineID()
             entries[index].target = BuildTarget.normalized(entries[index].target)
         }
@@ -216,6 +291,14 @@ import NXCore
         for batch in ended { batchEnded(batch) }
     }
 
+    /// Pauses waiting entries when a build the queue did not start is stopped by the player.
+    package func pauseForStoppedExternalOperation() {
+        guard running == nil, hasWaiting else { return }
+        paused = true
+        active = false
+        persist()
+    }
+
     // MARK: Running
 
     /// Starts each job on its own platform, applying shared iOS delivery options to waiting iOS jobs.
@@ -239,6 +322,13 @@ import NXCore
                     entries[index].packageAfter = false
                     entries[index].exportIPA = nil
                     entries[index].exportFramework = nil
+                    entries[index].destinationName = nil
+                    continue
+                }
+                if entries[index].upstream?.buildsIOSStandaloneOnly == true {
+                    entries[index].packageAfter = false
+                    entries[index].exportIPA = true
+                    entries[index].exportFramework = false
                     entries[index].destinationName = nil
                     continue
                 }
@@ -281,7 +371,10 @@ import NXCore
         guard let index = entries.firstIndex(where: { $0.status == .running }) else { return }
         entries[index].status = succeeded ? .done : (stopped ? .stopped : .failed)
         entries[index].reason = succeeded || stopped ? nil : reason
-        if succeeded && entries[index].target != BuildTarget.mac && entries[index].packageAfter {
+        if succeeded
+            && entries[index].target != BuildTarget.mac
+            && entries[index].packageAfter
+            && entries[index].upstream?.buildsIOSStandaloneOnly != true {
             entries[index].packagePending = false
         }
         let batch = entries[index].batch
@@ -348,6 +441,22 @@ import NXCore
         persist()
         processNext()
         if running == nil && !hasWaiting && packaging.isEmpty { active = false }
+    }
+
+    package func updateImgStatus(entryID: UUID?, titleID: String, imgStatus: QueueEntryImgStatus) {
+        if let entryID, let index = entries.firstIndex(where: { $0.id == entryID }) {
+            entries[index].imgStatus = imgStatus
+            persist()
+            return
+        }
+        let normalized = titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !normalized.isEmpty,
+              let index = entries.lastIndex(where: {
+                  $0.titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == normalized
+                      && $0.target != BuildTarget.mac
+              }) else { return }
+        entries[index].imgStatus = imgStatus
+        persist()
     }
 
     private func persist() { if let file { BuildQueueFile.save(entries, paused: paused, to: file) } }

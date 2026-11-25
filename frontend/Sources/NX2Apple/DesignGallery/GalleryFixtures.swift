@@ -8,11 +8,10 @@ import NXLauncher
 /// captures (LauncherDesignCaptureTests), so both show the same views (LNPANDY/NX2Apple#1458, #1459). Nothing here reads or writes the
 /// player's library, settings, engine or artwork, fetches anything or starts a process: each scene gets its own stores on a private
 /// defaults suite, a runner that refuses to start any process, no release source, a library in a temporary folder and generated artwork.
-/// Keep one alive while its views are shown: it owns the temporary folder and the defaults suites and removes them when released.
+/// Keep one alive while its views are shown: it owns the temporary folder and removes it when released.
 @MainActor final class GalleryFixtures {
     let lang: Lang
     let directory: URL
-    private var suites: [String] = []
 
     /// The scenes' games: the player's own (`covers`, copied by GalleryRealCovers into `coverFolder`) first, then the fictional
     /// ones up to the catalogue's size. Their states, badges and notices are the fixtures' in both cases.
@@ -48,12 +47,11 @@ import NXLauncher
 
     deinit {
         try? FileManager.default.removeItem(at: directory)
-        for suite in suites { UserDefaults.standard.removePersistentDomain(forName: suite) }   // the suites' own files, never the app's domain
     }
 
     /// Fictional games, so no title's art or name is shown.
     nonisolated static let games: [(titleID: String, name: String, hue: Double)] = [
-        ("0100000000010000", "Marble Orchard", 0.58), ("0100000000020000", "Lantern Coast", 0.08),
+        ("01000000000F0000", "Marble Orchard", 0.58), ("0100000000020000", "Lantern Coast", 0.08),
         ("0100000000030000", "Paper Comet", 0.83), ("0100000000040000", "Tidewater Run", 0.47),
         ("0100000000050000", "Echo Garden", 0.30), ("0100000000060000", "Iron Meadow", 0.0),
         ("0100000000070000", "Night Ferry", 0.66), ("0100000000080000", "Saltglass", 0.13),
@@ -186,10 +184,10 @@ import NXLauncher
                 stores.build.overallProgress = 0.4
                 stores.build.stages = [Stage(id: 1, name: "Shaders", state: .running, detail: "20 / 50", percent: 40, started: Date().addingTimeInterval(-95), eta: 140, etaAt: Date())]
             } else {
-                stores.build.overallProgress = 0.62
                 stores.build.stages = [Stage(id: 1, name: "Extract", state: .done), Stage(id: 2, name: "Romfs", state: .done),
                                        Stage(id: 3, name: "Shaders", state: .running, detail: "31 / 50", percent: 62, started: Date().addingTimeInterval(-240), eta: 150, etaAt: Date()),
                                        Stage(id: 4, name: "Package", state: .pending), Stage(id: 5, name: "Sign", state: .pending)]
+                stores.build.overallProgress = BuildProgress.overallFraction(stages: stores.build.stages, totalStages: 5)
             }
             root = AnyView(launcher(.builds, editor: true))
         case .buildFinishedMac:
@@ -231,6 +229,17 @@ import NXLauncher
             root = AnyView(launcher(.settings, category: .controls))
         case .settingsTools:
             Self.releaseEngine(stores)
+            let sampleScan = SeedScanResult(
+                seedRoot: "/Users/Shared/nxnative/build-seeds",
+                zstdAvailable: true,
+                totalGames: 2,
+                totalFiles: 2,
+                uncompressedBytes: 1_280_000_000,
+                estimatedCompressedBytes: 102_400_000,
+                estimatedSavedBytes: 1_177_600_000,
+                games: []
+            )
+            stores.seedCompression.setGalleryState(phase: nil, scanState: .ready(hasAnySeeds: true, scan: sampleScan, zstdConfirmed: true))
             root = AnyView(launcher(.settings, category: .tools))
         case .settingsEngineError:
             Self.releaseEngine(stores)
@@ -242,7 +251,7 @@ import NXLauncher
             root = onboardingView(scenario)
         case .onboardingState(let state):
             root = onboardingView(state)
-        case .nxkitEngine, .nxkitUnavailable, .nxkitUnsigned, .nxkitRunning, .nxkitFinished, .nxkitFailed, .nxkitLibrary:
+        case .nxkitEngine, .nxkitUnavailable, .nxkitUnsigned, .nxkitRunning, .nxkitFinished, .nxkitFailed, .nxkitLibrary, .nxkitGeneric:
             root = nxkitView(scene, stores: stores, library: library) { page, step, category in
                 AnyView(launcher(page, editor: page == .builds, category: category, step: step))
             }   // GalleryNxkit.swift
@@ -272,7 +281,7 @@ import NXLauncher
 
     /// Settings > Tools as the released app shows it: the app's own engine (EngineSyncStore), not a checkout. The tree is never
     /// read: the rows only ask whether there is one.
-    private static func releaseEngine(_ stores: LauncherStores) {
+    static func releaseEngine(_ stores: LauncherStores) {
         if stores.engineSync.bundle == nil { stores.engineSync.bundle = URL(fileURLWithPath: "/nonexistent/nx-gallery-engine") }
         stores.engineSync.selection = EngineSelection(channel: .stable, engineID: String(repeating: "c", count: 40), version: "1.5.0", previousID: "")
     }
@@ -290,9 +299,7 @@ import NXLauncher
 
     /// Stores with nothing of the player's: a private defaults suite, no process (GalleryProcessRunner), no release source.
     private func makeStores() -> (LauncherStores, UserDefaults) {
-        let suite = "nx.gallery." + UUID().uuidString
-        suites.append(suite)
-        let defaults = UserDefaults(suiteName: suite) ?? UserDefaults()
+        let defaults = GalleryDefaults.make("nx.gallery")
         let runner = GalleryProcessRunner()
         let stores = LauncherStores(localizer: Localizer(lang), runner: runner, gitCheckout: SystemGitCheckout(runner: runner),
                                     releases: GalleryReleases(), xcrun: "/usr/bin/false", volumesRoot: directory.appendingPathComponent("Volumes").path,
@@ -345,7 +352,7 @@ import NXLauncher
             try? fm.createSymbolicLink(at: app.appendingPathComponent("Contents/MacOS/" + exe), withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
         }
         let info: [String: Any] = ["DMTitleID": game.titleID, "CFBundleDisplayName": game.name, "CFBundleExecutable": "nxnative",
-                                   "CFBundleShortVersionString": "1.0.0", "CFBundleIdentifier": "org.nxnative.gallery." + UUID().uuidString]
+                                   "CFBundleShortVersionString": "1.0.0", "CFBundleIdentifier": GalleryDefaults.domain("gallery")]
         try? PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
         let settings = [
             #"{"env": "DM_FULLSCREEN", "kind": "toggle", "label": "Full screen", "note": "", "default": "0", "section": "Game", "level": "basic"}"#,

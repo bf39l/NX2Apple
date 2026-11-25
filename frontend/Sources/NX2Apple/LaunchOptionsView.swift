@@ -27,6 +27,9 @@ struct LaunchOptionsView: View {
     /// The cheats and the saves have sheets of their own: the launcher closes this one and opens them (nil: the row does nothing).
     var openCheats: ((UUID) -> Void)? = nil
     var openSaves: ((UUID) -> Void)? = nil
+    var initialCategory: LaunchCategory = .game
+    var initialAdvancedOpen = false
+    @State private var initializedSelection = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var choicesRevision = 0   // bumped by a change: the values are read from the store again
     @State private var modsRevision = 0   // bumped by Refresh: the folder is read again
@@ -57,7 +60,8 @@ struct LaunchOptionsView: View {
         let _ = choicesRevision
         let destination = game.map(LaunchDestination.init) ?? .none
         let shown = destination.categories.contains(category) ? category : (destination.categories.first ?? .game)
-        DSSheetStackLayout(width: LauncherSheet.width, maxHeight: maxHeight) {
+        // Always as high as a sheet may be, the height a game with many options has: the sheet keeps its size when a part or a game has less
+        DSSheetStackLayout(width: LauncherSheet.width, maxHeight: maxHeight, fill: true) {
             VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .bottom) {
                 DSSheetHeader(title: loc.t("launch.title"), message: game?.displayName(loc.lang) ?? "")
@@ -80,13 +84,23 @@ struct LaunchOptionsView: View {
                 .padding(.horizontal, DSSheetInsets.horizontal).padding(.bottom, DSSheetInsets.gap)
             }
             }
-            if let game {
-                if destination == .none { noBuild(game) } else { content(game, destination: destination, category: shown) }
+            VStack(alignment: .leading, spacing: 0) {
+                if let game {
+                    if destination == .none { noBuild(game) } else { content(game, destination: destination, category: shown) }
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             footer(game, destination: destination, category: shown)
         }
         .padScope("launch", focus)
-        .onAppear { library.migrateLaunchOptions() }
+        .onAppear {
+            if !initializedSelection {
+                initializedSelection = true
+                category = initialCategory
+                advancedOpen = initialAdvancedOpen
+            }
+            library.migrateLaunchOptions()
+        }
         .onChange(of: mappingPresentation.wrappedValue) { open in
             // The launcher owns routing when embedded, while standalone sheets keep the same scope behavior.
             if controllerMappingPresentation == nil { focus.scope = open ? "controls" : "launch" }
@@ -164,11 +178,11 @@ struct LaunchOptionsView: View {
                 .padTarget("opt.controllerMapping", scope: "launch") { mappingPresentation.wrappedValue = true }
         }
         if let settings, !settings.isEmpty {
-            let mine = settings.filter { LaunchCategory.of($0) == category }
+            let visible = settings.filter { LaunchCategory.of($0) == category && $0.isShown(in: settings) { value($0, game) } }
             if category == .performance, let note = ResolutionNote.text(settings, shown: { $0.isShown(in: settings) { value($0, game) } }, t: loc.t) { resolutionNote(note) }
-            groups(mine.filter(\.isBasic), game, all: settings)
+            groups(visible.filter(\.isBasic), game, all: settings)
             if category == .performance { frameTimesSection(game) }
-            let advanced = mine.filter { !$0.isBasic }
+            let advanced = visible.filter { !$0.isBasic }
             if !advanced.isEmpty {
                 card {
                     Button { withAnimation(LauncherMotion.animation(.easeInOut(duration: 0.18), reduceMotion: reduceMotion)) { advancedOpen.toggle() } } label: {
@@ -189,7 +203,7 @@ struct LaunchOptionsView: View {
         } else if category == .game {
             Text(loc.t("launch.none")).font(DS.Font.body).foregroundStyle(DS.Color.textSecondary).fixedSize(horizontal: false, vertical: true)
         }
-        if category == .performance, settings?.contains(where: { LaunchCategory.of($0) == .performance }) != true {
+        if category == .performance, settings?.contains(where: { LaunchCategory.of($0) == .performance && $0.isShown(in: settings ?? []) { value($0, game) } }) != true {
             Text(loc.t("launch.noPerformance")).font(DS.Font.body).foregroundStyle(DS.Color.textSecondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -209,7 +223,7 @@ struct LaunchOptionsView: View {
     /// Saves: the cloud state of a Mac game and the sheet that imports, exports and shows the backups.
     @ViewBuilder private func saves(_ game: LibraryGame, destination: LaunchDestination) -> some View {
         GameSavesSection(game: game, settings: saveSettings, players: players)   // first: the save files, import and export
-        if destination == .mac { CloudSavesCard(game: game, overrides: saveSettings) }
+        if destination == .mac { CloudSavesCard(game: game, overrides: saveSettings, players: players) }
         VStack(alignment: .leading, spacing: 10) {
             heading(loc.t("saves.menu"))
             card {
