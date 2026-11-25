@@ -449,6 +449,8 @@ class HostSourcesTest(unittest.TestCase):
         # Mac-only sources are dropped
         self.assertNotIn('front_mac.m', names)
         self.assertNotIn('controllers_mac.m', names)
+        self.assertNotIn('audio_input_dualsense_mac.m', names)
+        self.assertNotIn('dualsense_mic_mac.c', names)
         # the iOS front end is compiled by the iOS project, not the host walk
         self.assertNotIn('front_ios.m', names)
         self.assertNotIn('main.m', names)
